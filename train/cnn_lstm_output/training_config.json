@@ -1,0 +1,25 @@
+{
+    "model_structure": {
+        "cnn_feature_dim": 128,
+        "lstm_hidden_dim": 256,
+        "lstm_layers": 2,
+        "dropout": 0.3
+    },
+    "temporal_structure": {
+        "frames_per_period": 50,
+        "past_periods": 7,
+        "current_period": 1,
+        "future_periods": 2,
+        "total_frames": 500,
+        "target_frames": 50
+    },
+    "training_params": {
+        "batch_size": 16,
+        "learning_rate": 5e-05,
+        "epochs": 1,
+        "loss_function": "stable_smooth_l1_loss",
+        "optimizer": "AdamW",
+        "weight_decay": 1e-06,
+        "warmup_epochs": 3
+    }
+}
