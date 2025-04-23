@@ -357,6 +357,11 @@ def main():
     kl_losses = []
     learning_rates = []
     
+    # For validation loss tracking
+    val_losses = []
+    val_recon_losses = []
+    val_kl_losses = []
+    
     # Training loop
     for epoch in range(1, num_epochs + 1):
         model.train()
@@ -412,26 +417,68 @@ def main():
                     print(f"Error processing batch {batch_idx}, frame {frame_idx}: {e}")
                     continue
         
-        # Calculate average losses
+        # Calculate average training losses
         n_samples = len(train_loader) * len(frame_indices) * train_loader.batch_size
         avg_loss = train_loss / n_samples
         avg_recon = recon_loss_total / n_samples
         avg_kl = kl_loss_total / n_samples
         
-        # Record losses
+        # Record training losses
         epoch_losses.append(avg_loss)
         recon_losses.append(avg_recon)
         kl_losses.append(avg_kl)
         
+        # Validation phase
+        model.eval()
+        val_loss = 0
+        val_recon_loss = 0
+        val_kl_loss = 0
+        
+        with torch.no_grad():
+            for batch_idx, batch_data in enumerate(tqdm(test_loader, desc=f"Validation Epoch {epoch}")):
+                for frame_idx in frame_indices:
+                    try:
+                        # Extract and normalize frames from this batch
+                        frames = extract_frame(batch_data, frame_idx).to(device)
+                        
+                        # Forward pass
+                        recon_batch, mu, logvar = model(frames)
+                        
+                        # Calculate loss with current beta
+                        loss, recon, kl = vae_loss(recon_batch, frames, mu, logvar, beta)
+                        
+                        # Accumulate losses
+                        val_loss += loss.item()
+                        val_recon_loss += recon.item()
+                        val_kl_loss += kl.item()
+                        
+                    except Exception as e:
+                        print(f"Error processing validation batch {batch_idx}, frame {frame_idx}: {e}")
+                        continue
+        
+        # Calculate average validation losses
+        n_val_samples = len(test_loader) * len(frame_indices) * test_loader.batch_size
+        avg_val_loss = val_loss / n_val_samples
+        avg_val_recon = val_recon_loss / n_val_samples
+        avg_val_kl = val_kl_loss / n_val_samples
+        
+        # Record validation losses
+        val_losses.append(avg_val_loss)
+        val_recon_losses.append(avg_val_recon)
+        val_kl_losses.append(avg_val_kl)
+        
         # Print progress
-        print(f'Epoch {epoch}: Loss = {avg_loss:.4f}, Recon = {avg_recon:.4f}, KL = {avg_kl:.4f}, LR = {current_lr:.6f}')
+        print(f'Epoch {epoch}: Train Loss = {avg_loss:.4f}, Val Loss = {avg_val_loss:.4f}, Train Recon = {avg_recon:.4f}, Val Recon = {avg_val_recon:.4f}')
         
         # Log epoch-level metrics to wandb
         wandb.log({
             "epoch": epoch,
-            "total_loss": avg_loss,
-            "reconstruction_loss": avg_recon,
-            "kl_loss": avg_kl,
+            "train/total_loss": avg_loss,
+            "train/reconstruction_loss": avg_recon,
+            "train/kl_loss": avg_kl,
+            "val/total_loss": avg_val_loss,
+            "val/reconstruction_loss": avg_val_recon,
+            "val/kl_loss": avg_val_kl,
             "learning_rate": current_lr,
             "beta": beta
         })
@@ -439,9 +486,9 @@ def main():
         # Update learning rate scheduler (regular step for CosineAnnealingLR)
         scheduler.step()
         
-        # Check if this is the best model so far
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        # Check if this is the best model so far (using validation loss instead of training loss)
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
             best_epoch = epoch
             best_model_state = {
                 'epoch': epoch,
@@ -491,30 +538,71 @@ def main():
         wandb.log_artifact(model_artifact)
     
     # Plot loss curves
-    plt.figure(figsize=(15, 5))
+    plt.figure(figsize=(20, 10))
     
-    plt.subplot(1, 3, 1)
-    plt.plot(range(1, num_epochs + 1), epoch_losses)
+    # Total Loss
+    plt.subplot(2, 3, 1)
+    plt.plot(range(1, num_epochs + 1), epoch_losses, label='Train')
+    plt.plot(range(1, num_epochs + 1), val_losses, label='Validation')
     plt.xlabel('Epoch')
     plt.ylabel('Total Loss')
     plt.title('Total Loss vs. Epoch')
-    plt.grid(True)
-    
-    plt.subplot(1, 3, 2)
-    plt.plot(range(1, num_epochs + 1), recon_losses, label='Reconstruction')
-    plt.plot(range(1, num_epochs + 1), kl_losses, label='KL Divergence')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss Component')
-    plt.title('Loss Components vs. Epoch')
     plt.legend()
     plt.grid(True)
     
-    plt.subplot(1, 3, 3)
+    # Reconstruction Loss
+    plt.subplot(2, 3, 2)
+    plt.plot(range(1, num_epochs + 1), recon_losses, label='Train Reconstruction')
+    plt.plot(range(1, num_epochs + 1), val_recon_losses, label='Val Reconstruction')
+    plt.xlabel('Epoch')
+    plt.ylabel('Reconstruction Loss')
+    plt.title('Reconstruction Loss vs. Epoch')
+    plt.legend()
+    plt.grid(True)
+    
+    # KL Divergence
+    plt.subplot(2, 3, 3)
+    plt.plot(range(1, num_epochs + 1), kl_losses, label='Train KL')
+    plt.plot(range(1, num_epochs + 1), val_kl_losses, label='Val KL')
+    plt.xlabel('Epoch')
+    plt.ylabel('KL Divergence')
+    plt.title('KL Divergence vs. Epoch')
+    plt.legend()
+    plt.grid(True)
+    
+    # Learning Rate
+    plt.subplot(2, 3, 4)
     plt.plot(range(1, num_epochs + 1), learning_rates)
     plt.xlabel('Epoch')
     plt.ylabel('Learning Rate')
     plt.title('Learning Rate vs. Epoch')
     plt.grid(True)
+    
+    # Beta Value
+    plt.subplot(2, 3, 5)
+    beta_values = []
+    for epoch in range(1, num_epochs + 1):
+        if epoch <= beta_warmup_epochs:
+            beta = initial_beta + (final_beta - initial_beta) * (epoch - 1) / (beta_warmup_epochs - 1)
+        else:
+            beta = final_beta
+        beta_values.append(beta)
+    plt.plot(range(1, num_epochs + 1), beta_values)
+    plt.xlabel('Epoch')
+    plt.ylabel('Beta')
+    plt.title('Beta vs. Epoch')
+    plt.grid(True)
+    
+    # Train vs Val Loss Scatter
+    # plt.subplot(2, 3, 6)
+    # plt.scatter(epoch_losses, val_losses, c=range(1, num_epochs + 1), cmap='viridis')
+    # plt.plot([min(epoch_losses), max(epoch_losses)], [min(epoch_losses), max(epoch_losses)], 'r--', label='y=x')
+    # plt.xlabel('Training Loss')
+    # plt.ylabel('Validation Loss')
+    # plt.title('Training vs Validation Loss')
+    # plt.colorbar(label='Epoch')
+    # plt.legend()
+    # plt.grid(True)
     
     plt.tight_layout()
     plt.savefig(os.path.join(results_dir, 'training_curves.png'), dpi=150)
