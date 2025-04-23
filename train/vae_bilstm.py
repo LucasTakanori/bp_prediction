@@ -401,7 +401,7 @@ def train_bilstm(model, train_loader, val_batches, device, num_epochs=20,
                 sample_count += sequences.size(0)
                 
                 # Log batch-level metrics to wandb
-                if batch_idx % 5 == 0:  # Log every 10 batches
+                if batch_idx % 2 == 0:  # Log every 10 batches
                     wandb.log({
                         "batch_loss": loss.item(),
                         "batch": epoch * len(train_loader) + batch_idx
@@ -626,10 +626,10 @@ def evaluate_bilstm(model, test_loader, device, pattern_offsets=[-7, 0, 3],
             "diastolic_error": dias_error
         })
         
-        return test_loss, mse, mae, r2, sys_mae, dias_mae
+        return test_loss, mse, mae, r2, sys_mae, dias_mae, sys_error, dias_error
     else:
         print("No valid predictions were made during evaluation")
-        return test_loss, None, None, None, None, None
+        return test_loss, None, None, None, None, None, None, None
 
 
 # Plot example predictions vs targets
@@ -671,13 +671,18 @@ def plot_predictions(predictions, targets, output_dir, num_examples=5):
 
 # Calculate systolic and diastolic metrics
 def calculate_bp_metrics(predictions, targets, output_dir):
-    """Calculate metrics for systolic and diastolic pressure"""
+    """
+    Calculate metrics for systolic and diastolic pressure
+    
+    Systolic: Maximum value in each 50-point BP waveform
+    Diastolic: Minimum value in each 50-point BP waveform
+    """
     
     results_dir = os.path.join(output_dir, 'results')
     
     # For each waveform, get systolic (max) and diastolic (min)
-    sys_targets = np.max(targets, axis=1)
-    dias_targets = np.min(targets, axis=1)
+    sys_targets = np.max(targets, axis=1)  # Extract systolic (peak) from each waveform
+    dias_targets = np.min(targets, axis=1)  # Extract diastolic (trough) from each waveform
     
     sys_preds = np.max(predictions, axis=1)
     dias_preds = np.min(predictions, axis=1)
@@ -689,6 +694,15 @@ def calculate_bp_metrics(predictions, targets, output_dir):
     # Calculate mean error (for bias assessment)
     sys_error = np.mean(sys_targets - sys_preds)
     dias_error = np.mean(dias_targets - dias_preds)
+    
+    # Log detailed metrics to wandb
+    wandb.log({
+        "systolic_mae_detailed": sys_mae,
+        "systolic_mean_error": sys_error,
+        "diastolic_mae_detailed": dias_mae,
+        "diastolic_mean_error": dias_error,
+        "num_waveforms": len(targets)
+    })
     
     # Plot Bland-Altman plot for systolic pressure
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -1067,7 +1081,7 @@ def main():
     pattern_offsets = best_checkpoint.get('pattern_offsets', pattern_offsets)
     
     # Evaluate on test data
-    test_loss, mse, mae, r2, sys_mae, dias_mae = evaluate_bilstm(
+    test_loss, mse, mae, r2, sys_mae, dias_mae, sys_error, dias_error = evaluate_bilstm(
         model=bilstm_model,
         test_loader=test_loader,
         device=device,
@@ -1087,12 +1101,39 @@ def main():
         output_dir=args.output_dir
     )
     
+    # Create a table for wandb
+    if mse is not None:
+        metrics_table = wandb.Table(columns=["Metric", "Value", "Description"])
+        
+        # Add basic metrics
+        metrics_table.add_data("Test Loss (normalized)", test_loss, "Loss computed on normalized data")
+        metrics_table.add_data("MSE", mse, "Mean Squared Error on denormalized data")
+        metrics_table.add_data("MAE", mae, "Mean Absolute Error on denormalized data")
+        metrics_table.add_data("R² (denormalized)", r2, "R-squared on denormalized data")
+        
+        # Add systolic and diastolic metrics
+        metrics_table.add_data("Systolic MAE", sys_mae, "Mean Absolute Error for systolic values (mmHg)")
+        metrics_table.add_data("Systolic Mean Error", sys_error, "Mean Error (bias) for systolic values (mmHg)")
+        metrics_table.add_data("Diastolic MAE", dias_mae, "Mean Absolute Error for diastolic values (mmHg)")
+        metrics_table.add_data("Diastolic Mean Error", dias_error, "Mean Error (bias) for diastolic values (mmHg)")
+        
+        # Add advanced metrics if available
+        if adv_metrics is not None:
+            adv_mse, adv_mae, adv_r2, pearson_r, adv_sys_mae, adv_dias_mae, sys_pearson, dias_pearson = adv_metrics
+            metrics_table.add_data("Pearson Correlation", pearson_r, "Overall Pearson correlation coefficient")
+            metrics_table.add_data("Systolic Pearson r", sys_pearson, "Pearson correlation for systolic values")
+            metrics_table.add_data("Diastolic Pearson r", dias_pearson, "Pearson correlation for diastolic values")
+            metrics_table.add_data("Advanced R²", adv_r2, "R-squared from improved evaluation")
+        
+        # Log the table to wandb
+        wandb.log({"evaluation_metrics_table": metrics_table})
+    
     # Save the evaluation metrics
     results_file = os.path.join(args.output_dir, 'results/evaluation_metrics.txt')
     with open(results_file, 'w') as f:
         f.write(f"Best Epoch: {best_epoch}\n")
         f.write(f"Best Validation Loss: {best_val_loss:.6f}\n")
-        f.write(f"Test Loss: {test_loss:.6f}\n")
+        f.write(f"Test Loss (normalized): {test_loss:.6f}\n")
         f.write(f"Frame Pattern Offsets: {pattern_offsets}\n")
         f.write(f"VAE Checkpoint: {vae_checkpoint_path}\n")
         f.write(f"Latent Dimension: {latent_dim}\n")
@@ -1102,9 +1143,9 @@ def main():
         if mse is not None:
             f.write(f"MSE: {mse:.6f}\n")
             f.write(f"MAE: {mae:.6f}\n")
-            f.write(f"R²: {r2:.6f}\n")
-            f.write(f"Systolic MAE: {sys_mae:.2f} mmHg\n")
-            f.write(f"Diastolic MAE: {dias_mae:.2f} mmHg\n")
+            f.write(f"R² (denormalized): {r2:.6f}\n")
+            f.write(f"Systolic MAE: {sys_mae:.2f} mmHg (mean error: {sys_error:.2f})\n")
+            f.write(f"Diastolic MAE: {dias_mae:.2f} mmHg (mean error: {dias_error:.2f})\n")
             
             # Add advanced metrics if available
             if adv_metrics is not None:
@@ -1113,6 +1154,7 @@ def main():
                 f.write(f"Pearson Correlation: {pearson_r:.6f}\n")
                 f.write(f"Systolic Pearson r: {sys_pearson:.6f}\n")
                 f.write(f"Diastolic Pearson r: {dias_pearson:.6f}\n")
+                f.write(f"Advanced R² (if computed): {adv_r2:.6f}\n")
         else:
             f.write("No valid predictions were made during evaluation\n")
     
