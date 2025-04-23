@@ -9,7 +9,7 @@ results/
 models/
 vae_output/
 vae_output_1/
-
+wandb/
 
 # C extensions
 *.so

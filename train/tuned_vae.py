@@ -8,6 +8,7 @@ import sys
 import numpy as np
 import argparse
 from tqdm import tqdm
+import wandb
 
 # Add the parent directory to the path to find utils
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -231,11 +232,11 @@ def visualize_reconstructions(model, test_data, device, frame_idx=0, num_images=
     plt.savefig(save_path, dpi=150)
     print(f"Saved reconstructions for epoch {epoch} to {save_path}")
     
+    # Log the reconstruction plot to wandb
+    wandb.log({f"reconstructions_epoch_{epoch}": wandb.Image(plt)})
+    
     plt.close(fig)
     return recon_batch  # Return reconstructions for further analysis if needed
-
-
-# Function to generate samples removed as requested
 
 
 def main():
@@ -256,8 +257,36 @@ def main():
                         help='Maximum beta value for KL divergence weight')
     parser.add_argument('--beta_warmup_epochs', type=int, default=15,  # Increased warmup period
                         help='Number of epochs to warm up beta')
+    parser.add_argument('--wandb_project', type=str, default='vae-pvi',
+                        help='Weights & Biases project name')
+    parser.add_argument('--wandb_name', type=str, default=None,
+                        help='Weights & Biases run name')
+    parser.add_argument('--wandb_mode', type=str, default='offline',
+                        choices=['online', 'offline', 'disabled'],
+                        help='Weights & Biases mode')
     
     args = parser.parse_args()
+    
+    # Initialize wandb
+    wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_name,
+        config={
+            "latent_dim": args.latent_dim,
+            "num_epochs": args.num_epochs,
+            "initial_lr": 1e-3,
+            "beta_min": args.beta_min,
+            "beta_max": args.beta_max,
+            "beta_warmup_epochs": args.beta_warmup_epochs,
+            "batch_size": 16,
+            "weight_decay": 1e-5,
+            "dropout": 0.2,
+            "frame_indices": [0, 100, 200, 300, 400],
+            "data_path": args.data_path,
+            "output_dir": args.output_dir
+        },
+        mode=args.wandb_mode
+    )
     
     # Create output directory and subdirectories
     os.makedirs(args.output_dir, exist_ok=True)
@@ -272,6 +301,7 @@ def main():
     # Set up device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    wandb.config.update({"device": str(device)})
     
     # Set hyperparameters
     latent_dim = args.latent_dim
@@ -290,6 +320,7 @@ def main():
     print(f"Loading dataset from: {args.data_path}")
     dataset = PviDataset(args.data_path)
     print(f"Dataset loaded with {len(dataset)} samples")
+    wandb.config.update({"dataset_size": len(dataset)})
     
     # Create batch server
     batch_server = PviBatchServer(dataset, input_type="img", output_type="full")
@@ -303,6 +334,9 @@ def main():
     # Initialize model
     model = VAE(latent_dim=latent_dim).to(device)
     print(f"Model initialized with latent dimension {latent_dim}")
+    
+    # Log model architecture to wandb
+    wandb.watch(model, log="all", log_freq=100)
     
     # Setup optimizer
     optimizer = optim.Adam(model.parameters(), lr=initial_lr, weight_decay=1e-5)  # Added weight decay for regularization
@@ -365,6 +399,15 @@ def main():
                     recon_loss_total += recon.item()
                     kl_loss_total += kl.item()
                     
+                    # Log batch-level metrics to wandb
+                    if batch_idx % 10 == 0:  # Log every 10 batches
+                        wandb.log({
+                            "batch_loss": loss.item() / frames.size(0),
+                            "batch_recon_loss": recon.item() / frames.size(0),
+                            "batch_kl_loss": kl.item() / frames.size(0),
+                            "batch": epoch * len(train_loader) + batch_idx
+                        })
+                    
                 except Exception as e:
                     print(f"Error processing batch {batch_idx}, frame {frame_idx}: {e}")
                     continue
@@ -383,6 +426,16 @@ def main():
         # Print progress
         print(f'Epoch {epoch}: Loss = {avg_loss:.4f}, Recon = {avg_recon:.4f}, KL = {avg_kl:.4f}, LR = {current_lr:.6f}')
         
+        # Log epoch-level metrics to wandb
+        wandb.log({
+            "epoch": epoch,
+            "total_loss": avg_loss,
+            "reconstruction_loss": avg_recon,
+            "kl_loss": avg_kl,
+            "learning_rate": current_lr,
+            "beta": beta
+        })
+        
         # Update learning rate scheduler (regular step for CosineAnnealingLR)
         scheduler.step()
         
@@ -400,6 +453,10 @@ def main():
                 'latent_dim': latent_dim
             }
             print(f"New best model at epoch {epoch} with loss {best_loss:.4f}")
+            
+            # Log best model info to wandb
+            wandb.run.summary["best_epoch"] = best_epoch
+            wandb.run.summary["best_loss"] = best_loss
         
         # Visualize reconstructions on first epoch
         if epoch == 1:
@@ -427,6 +484,11 @@ def main():
     if best_model_state is not None:
         torch.save(best_model_state, os.path.join(checkpoints_dir, 'vae_best.pt'))
         print(f"Saved best model from epoch {best_epoch} with loss {best_loss:.4f}")
+        
+        # Save model artifact to wandb
+        model_artifact = wandb.Artifact('vae_model', type='model')
+        model_artifact.add_file(os.path.join(checkpoints_dir, 'vae_best.pt'))
+        wandb.log_artifact(model_artifact)
     
     # Plot loss curves
     plt.figure(figsize=(15, 5))
@@ -456,6 +518,10 @@ def main():
     
     plt.tight_layout()
     plt.savefig(os.path.join(results_dir, 'training_curves.png'), dpi=150)
+    
+    # Log final training curves to wandb
+    wandb.log({"training_curves": wandb.Image(plt)})
+    
     plt.close()
     
     print("Training completed!")
@@ -465,6 +531,9 @@ def main():
     print(f"All checkpoints saved in: {os.path.abspath(checkpoints_dir)}")
     print(f"All reconstructions saved in: {os.path.abspath(reconstructions_dir)}")
     print(f"Training results saved in: {os.path.abspath(results_dir)}")
+    
+    # Finish wandb run
+    wandb.finish()
 
 
 if __name__ == "__main__":
