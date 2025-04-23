@@ -1,0 +1,471 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import matplotlib.pyplot as plt
+import os
+import sys
+import numpy as np
+import argparse
+from tqdm import tqdm
+
+# Add the parent directory to the path to find utils
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Import your dataset utilities
+from utils.data_utils import PviDataset, PviBatchServer
+
+# Define the VAE model
+class VAE(nn.Module):
+    def __init__(self, latent_dim=64):
+        super(VAE, self).__init__()
+        
+        # Encoder - increased filter counts and added batch normalization
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=3, stride=2, padding=1)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
+        self.bn2 = nn.BatchNorm2d(128)
+        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1)
+        self.bn3 = nn.BatchNorm2d(256)
+        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1)
+        self.bn4 = nn.BatchNorm2d(512)
+        
+        # Fully connected layers for mean and variance
+        self.fc_mu = nn.Linear(512 * 2 * 2, latent_dim)
+        self.fc_logvar = nn.Linear(512 * 2 * 2, latent_dim)
+        
+        # Decoder
+        self.fc_decoder = nn.Linear(latent_dim, 512 * 2 * 2)
+        self.bn_dec = nn.BatchNorm1d(512 * 2 * 2)
+        
+        self.deconv1 = nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.bn_dec1 = nn.BatchNorm2d(256)
+        self.deconv2 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.bn_dec2 = nn.BatchNorm2d(128)
+        self.deconv3 = nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.bn_dec3 = nn.BatchNorm2d(64)
+        self.deconv4 = nn.ConvTranspose2d(64, 1, kernel_size=3, stride=2, padding=1, output_padding=1)
+        
+        # Add dropout for regularization
+        self.dropout = nn.Dropout(0.2)
+        
+    def encode(self, x):
+        # Forward pass through encoder
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.dropout(x)  # Apply dropout
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu(self.bn4(self.conv4(x)))
+        
+        # Flatten
+        x = x.view(x.size(0), -1)
+        
+        # Get mean and log variance
+        mu = self.fc_mu(x)
+        logvar = self.fc_logvar(x)
+        
+        return mu, logvar
+    
+    def reparameterize(self, mu, logvar):
+        # Reparameterization trick
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        return z
+    
+    def decode(self, z):
+        # Forward pass through decoder
+        x = self.fc_decoder(z)
+        x = F.relu(self.bn_dec(x))
+        x = x.view(x.size(0), 512, 2, 2)
+        
+        x = F.relu(self.bn_dec1(self.deconv1(x)))
+        x = F.relu(self.bn_dec2(self.deconv2(x)))
+        x = self.dropout(x)  # Apply dropout
+        x = F.relu(self.bn_dec3(self.deconv3(x)))
+        x = torch.sigmoid(self.deconv4(x))
+        
+        return x
+    
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        x_recon = self.decode(z)
+        return x_recon, mu, logvar
+
+
+# Extract and normalize a specific frame from each sample
+def extract_frame(batch_data, frame_idx=0):
+    """Extract a specific frame from the batch data and normalize it to [0, 1]"""
+    if isinstance(batch_data, dict):
+        # If batch is a dictionary (like in your debug output)
+        pvi_data = batch_data['pviHP']
+    else:
+        # If batch is just the tensor
+        pvi_data = batch_data
+    
+    # Extract the specific frame from each sample
+    # Shape: [batch_size, 1, 32, 32]
+    frames = pvi_data[:, 0, :, :, frame_idx].unsqueeze(1)
+    
+    # Replace NaN values with zeros
+    frames = torch.nan_to_num(frames, nan=0.0)
+    
+    # Normalize to [0, 1] range for each sample individually
+    # First find min and max per sample
+    batch_size = frames.shape[0]
+    normalized_frames = torch.zeros_like(frames)
+    
+    for i in range(batch_size):
+        sample = frames[i]
+        min_val = torch.min(sample)
+        max_val = torch.max(sample)
+        
+        # Handle case where min == max (constant value)
+        if min_val == max_val:
+            normalized_frames[i] = torch.zeros_like(sample)
+        else:
+            # Normalize to [0, 1]
+            normalized_frames[i] = (sample - min_val) / (max_val - min_val)
+    
+    return normalized_frames
+
+
+# Loss function with KL weight (beta)
+def vae_loss(recon_x, x, mu, logvar, beta):
+    """VAE loss = reconstruction loss + beta * KL divergence"""
+    # Ensure inputs are valid for binary cross entropy (between 0 and 1)
+    x = torch.clamp(x, 0.0, 1.0)
+    recon_x = torch.clamp(recon_x, 0.0, 1.0)
+    
+    # Reconstruction loss - use MSE loss which can be more stable than BCE for some data types
+    # You can uncomment and use the BCE loss if your data is truly binary
+    # recon_loss = F.binary_cross_entropy(recon_x, x, reduction='sum')
+    
+    # MSE loss - can give smoother gradients and work better for continuous data
+    recon_loss = F.mse_loss(recon_x, x, reduction='sum') * 100  # Scale factor to make comparable to BCE
+    
+    # KL divergence
+    kl_div = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    
+    # Total loss
+    total_loss = recon_loss + beta * kl_div
+    
+    return total_loss, recon_loss, kl_div
+
+
+# Visualize reconstructions and save the figure
+def visualize_reconstructions(model, test_data, device, frame_idx=0, num_images=5, epoch=0, output_dir=None):
+    reconstructions_dir = os.path.join(output_dir, 'reconstructions')
+    
+    model.eval()
+    
+    # Get a batch from test data
+    with torch.no_grad():
+        # Extract and normalize the specific frame
+        frames = extract_frame(test_data, frame_idx).to(device)
+        
+        # Limit to num_images
+        frames = frames[:num_images]
+        
+        # Get reconstructions
+        recon_batch, _, _ = model(frames)
+    
+    # Create a figure
+    fig, axes = plt.subplots(2, num_images, figsize=(15, 6))
+    
+    # Convert tensors to numpy for plotting
+    frames = frames.cpu().numpy()
+    recon_batch = recon_batch.cpu().numpy()
+    
+    # Plot original images with axes values
+    for i in range(num_images):
+        # Turn on axis to show coordinates
+        axes[0, i].axis('on')
+        
+        # Plot the image with origin at lower left
+        img_plot = axes[0, i].imshow(frames[i, 0], cmap='viridis', origin='lower')
+        
+        # Set x and y ticks to show coordinates
+        img_height, img_width = frames[i, 0].shape
+        x_ticks = np.linspace(0, img_width-1, 5, dtype=int)  # 5 ticks on x-axis
+        y_ticks = np.linspace(0, img_height-1, 5, dtype=int)  # 5 ticks on y-axis
+        
+        axes[0, i].set_xticks(x_ticks)
+        axes[0, i].set_yticks(y_ticks)
+        
+        # Add colorbar for each plot to show intensity values
+        cbar = plt.colorbar(img_plot, ax=axes[0, i], fraction=0.046, pad=0.04)
+        cbar.set_label('Intensity')
+        
+        # Add sample number as title
+        axes[0, i].set_title(f'Original Sample {i+1}')
+        
+    # Plot reconstructed images with axes values
+    for i in range(num_images):
+        # Turn on axis
+        axes[1, i].axis('on')
+        
+        # Plot the image with origin at lower left
+        img_plot = axes[1, i].imshow(recon_batch[i, 0], cmap='viridis', origin='lower')
+        
+        # Set x and y ticks to show coordinates
+        img_height, img_width = recon_batch[i, 0].shape
+        x_ticks = np.linspace(0, img_width-1, 5, dtype=int)  # 5 ticks on x-axis
+        y_ticks = np.linspace(0, img_height-1, 5, dtype=int)  # 5 ticks on y-axis
+        
+        axes[1, i].set_xticks(x_ticks)
+        axes[1, i].set_yticks(y_ticks)
+        
+        # Add colorbar for each plot to show intensity values
+        cbar = plt.colorbar(img_plot, ax=axes[1, i], fraction=0.046, pad=0.04)
+        cbar.set_label('Intensity')
+        
+        # Add sample number as title
+        axes[1, i].set_title(f'Reconstructed Sample {i+1}')
+    
+    plt.suptitle(f'Epoch {epoch}', fontsize=16)
+    plt.tight_layout()
+    
+    # Save the figure
+    save_path = os.path.join(reconstructions_dir, f'recon_epoch_{epoch}.png')
+    plt.savefig(save_path, dpi=150)
+    print(f"Saved reconstructions for epoch {epoch} to {save_path}")
+    
+    plt.close(fig)
+    return recon_batch  # Return reconstructions for further analysis if needed
+
+
+# Function to generate samples removed as requested
+
+
+def main():
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Train VAE on PVI data')
+    parser.add_argument('--output_dir', type=str, default='vae_output',
+                        help='Directory for saving output files')
+    parser.add_argument('--data_path', type=str, 
+                        default=os.path.expanduser("~/phd/data/subject001_baseline_masked.h5"),
+                        help='Path to the H5 data file')
+    parser.add_argument('--latent_dim', type=int, default=256,  # Increased from 128 to 256
+                        help='Dimension of latent space')
+    parser.add_argument('--num_epochs', type=int, default=30,   # Increased from 20 to 30
+                        help='Number of training epochs')
+    parser.add_argument('--beta_min', type=float, default=0.01,
+                        help='Minimum beta value for KL divergence weight')
+    parser.add_argument('--beta_max', type=float, default=1.0,
+                        help='Maximum beta value for KL divergence weight')
+    parser.add_argument('--beta_warmup_epochs', type=int, default=15,  # Increased warmup period
+                        help='Number of epochs to warm up beta')
+    
+    args = parser.parse_args()
+    
+    # Create output directory and subdirectories
+    os.makedirs(args.output_dir, exist_ok=True)
+    checkpoints_dir = os.path.join(args.output_dir, 'checkpoints')
+    reconstructions_dir = os.path.join(args.output_dir, 'reconstructions')
+    results_dir = os.path.join(args.output_dir, 'results')
+    
+    os.makedirs(checkpoints_dir, exist_ok=True)
+    os.makedirs(reconstructions_dir, exist_ok=True)
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Set up device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Set hyperparameters
+    latent_dim = args.latent_dim
+    num_epochs = args.num_epochs
+    initial_lr = 1e-3
+    initial_beta = args.beta_min
+    final_beta = args.beta_max
+    beta_warmup_epochs = args.beta_warmup_epochs
+    
+    # Initialize the best model tracking
+    best_loss = float('inf')
+    best_epoch = 0
+    best_model_state = None
+    
+    # Load dataset
+    print(f"Loading dataset from: {args.data_path}")
+    dataset = PviDataset(args.data_path)
+    print(f"Dataset loaded with {len(dataset)} samples")
+    
+    # Create batch server
+    batch_server = PviBatchServer(dataset, input_type="img", output_type="full")
+    
+    # Set batch size using the correct method
+    batch_server.set_loader_params(batch_size=16, test_size=0.2)
+    
+    # Get loaders
+    train_loader, test_loader = batch_server.get_loaders()
+    
+    # Initialize model
+    model = VAE(latent_dim=latent_dim).to(device)
+    print(f"Model initialized with latent dimension {latent_dim}")
+    
+    # Setup optimizer
+    optimizer = optim.Adam(model.parameters(), lr=initial_lr, weight_decay=1e-5)  # Added weight decay for regularization
+    
+    # Setup learning rate scheduler - Use CosineAnnealingLR for smooth decay without restarts
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=num_epochs,  # Full cycle length equals total training epochs
+        eta_min=1e-6       # Minimum learning rate
+    )
+    
+    # Choose frames to use for training (multiple frames for more data)
+    frame_indices = [0, 100, 200, 300, 400]  # Sample frames from different parts of the sequence
+    
+    # For recording losses
+    epoch_losses = []
+    recon_losses = []
+    kl_losses = []
+    learning_rates = []
+    
+    # Training loop
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        train_loss = 0
+        recon_loss_total = 0
+        kl_loss_total = 0
+        
+        # Calculate beta for this epoch (linear annealing)
+        if epoch <= beta_warmup_epochs:
+            beta = initial_beta + (final_beta - initial_beta) * (epoch - 1) / (beta_warmup_epochs - 1)
+        else:
+            beta = final_beta
+        
+        # Get current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        learning_rates.append(current_lr)
+        
+        print(f"Epoch {epoch}, beta = {beta:.4f}, LR = {current_lr:.6f}")
+        
+        # Training
+        for batch_idx, batch_data in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}")):
+            for frame_idx in frame_indices:
+                try:
+                    # Extract and normalize frames from this batch
+                    frames = extract_frame(batch_data, frame_idx).to(device)
+                    
+                    # Forward pass
+                    optimizer.zero_grad()
+                    recon_batch, mu, logvar = model(frames)
+                    
+                    # Calculate loss with current beta
+                    loss, recon, kl = vae_loss(recon_batch, frames, mu, logvar, beta)
+                    
+                    # Backward pass
+                    loss.backward()
+                    optimizer.step()
+                    
+                    # Accumulate losses
+                    train_loss += loss.item()
+                    recon_loss_total += recon.item()
+                    kl_loss_total += kl.item()
+                    
+                except Exception as e:
+                    print(f"Error processing batch {batch_idx}, frame {frame_idx}: {e}")
+                    continue
+        
+        # Calculate average losses
+        n_samples = len(train_loader) * len(frame_indices) * train_loader.batch_size
+        avg_loss = train_loss / n_samples
+        avg_recon = recon_loss_total / n_samples
+        avg_kl = kl_loss_total / n_samples
+        
+        # Record losses
+        epoch_losses.append(avg_loss)
+        recon_losses.append(avg_recon)
+        kl_losses.append(avg_kl)
+        
+        # Print progress
+        print(f'Epoch {epoch}: Loss = {avg_loss:.4f}, Recon = {avg_recon:.4f}, KL = {avg_kl:.4f}, LR = {current_lr:.6f}')
+        
+        # Update learning rate scheduler (regular step for CosineAnnealingLR)
+        scheduler.step()
+        
+        # Check if this is the best model so far
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            best_epoch = epoch
+            best_model_state = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'loss': avg_loss,
+                'beta': beta,
+                'latent_dim': latent_dim
+            }
+            print(f"New best model at epoch {epoch} with loss {best_loss:.4f}")
+        
+        # Visualize reconstructions on first epoch
+        if epoch == 1:
+            test_batch = next(iter(test_loader))
+            visualize_reconstructions(model, test_batch, device, frame_idx=200, epoch=epoch, output_dir=args.output_dir)
+            
+        # Save checkpoint only every 5 epochs or at the last epoch
+        if epoch % 5 == 0 or epoch == num_epochs:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'loss': avg_loss,
+                'beta': beta,
+                'latent_dim': latent_dim
+            }, os.path.join(checkpoints_dir, f'vae_epoch_{epoch}.pt'))
+            
+            # Visualize reconstructions every 5 epochs or last epoch
+            if epoch != 1:  # Skip if already done on first epoch
+                test_batch = next(iter(test_loader))
+                visualize_reconstructions(model, test_batch, device, frame_idx=200, epoch=epoch, output_dir=args.output_dir)
+    
+    # Save the best model at the end of training
+    if best_model_state is not None:
+        torch.save(best_model_state, os.path.join(checkpoints_dir, 'vae_best.pt'))
+        print(f"Saved best model from epoch {best_epoch} with loss {best_loss:.4f}")
+    
+    # Plot loss curves
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(1, 3, 1)
+    plt.plot(range(1, num_epochs + 1), epoch_losses)
+    plt.xlabel('Epoch')
+    plt.ylabel('Total Loss')
+    plt.title('Total Loss vs. Epoch')
+    plt.grid(True)
+    
+    plt.subplot(1, 3, 2)
+    plt.plot(range(1, num_epochs + 1), recon_losses, label='Reconstruction')
+    plt.plot(range(1, num_epochs + 1), kl_losses, label='KL Divergence')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss Component')
+    plt.title('Loss Components vs. Epoch')
+    plt.legend()
+    plt.grid(True)
+    
+    plt.subplot(1, 3, 3)
+    plt.plot(range(1, num_epochs + 1), learning_rates)
+    plt.xlabel('Epoch')
+    plt.ylabel('Learning Rate')
+    plt.title('Learning Rate vs. Epoch')
+    plt.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'training_curves.png'), dpi=150)
+    plt.close()
+    
+    print("Training completed!")
+    print(f"Best model was at epoch {best_epoch} with loss {best_loss:.4f}")
+    
+    # Print directories
+    print(f"All checkpoints saved in: {os.path.abspath(checkpoints_dir)}")
+    print(f"All reconstructions saved in: {os.path.abspath(reconstructions_dir)}")
+    print(f"Training results saved in: {os.path.abspath(results_dir)}")
+
+
+if __name__ == "__main__":
+    main()
