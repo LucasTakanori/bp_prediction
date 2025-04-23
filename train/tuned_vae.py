@@ -336,7 +336,7 @@ def main():
     print(f"Model initialized with latent dimension {latent_dim}")
     
     # Log model architecture to wandb
-    wandb.watch(model, log="all", log_freq=100)
+    #wandb.watch(model, log="all", log_freq=100)
     
     # Setup optimizer
     optimizer = optim.Adam(model.parameters(), lr=initial_lr, weight_decay=1e-5)  # Added weight decay for regularization
