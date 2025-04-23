@@ -9,6 +9,7 @@ import numpy as np
 import argparse
 from tqdm import tqdm
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import wandb
 
 # Add the parent directory to the path to find utils
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -399,6 +400,13 @@ def train_bilstm(model, train_loader, val_batches, device, num_epochs=20,
                 train_loss += loss.item() * sequences.size(0)
                 sample_count += sequences.size(0)
                 
+                # Log batch-level metrics to wandb
+                if batch_idx % 5 == 0:  # Log every 10 batches
+                    wandb.log({
+                        "batch_loss": loss.item(),
+                        "batch": epoch * len(train_loader) + batch_idx
+                    })
+                
             except Exception as e:
                 print(f"Error processing batch {batch_idx}: {e}")
                 continue
@@ -451,6 +459,14 @@ def train_bilstm(model, train_loader, val_batches, device, num_epochs=20,
         # Print progress
         print(f"Epoch {epoch}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, LR = {current_lr:.6f}")
         
+        # Log epoch-level metrics to wandb
+        wandb.log({
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "learning_rate": current_lr
+        })
+        
         # Check if this is the best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -467,6 +483,10 @@ def train_bilstm(model, train_loader, val_batches, device, num_epochs=20,
             }, os.path.join(checkpoints_dir, 'bilstm_best.pt'))
             
             print(f"New best model at epoch {epoch} with validation loss {val_loss:.6f}")
+            
+            # Log best model info to wandb
+            wandb.run.summary["best_epoch"] = best_epoch
+            wandb.run.summary["best_val_loss"] = best_val_loss
         
         # Save checkpoint every 5 epochs
         if epoch % 5 == 0 or epoch == num_epochs:
@@ -500,6 +520,10 @@ def train_bilstm(model, train_loader, val_batches, device, num_epochs=20,
     
     plt.tight_layout()
     plt.savefig(os.path.join(results_dir, 'bilstm_training_curves.png'), dpi=150)
+    
+    # Log training curves to wandb
+    wandb.log({"training_curves": wandb.Image(plt)})
+    
     plt.close()
     
     print(f"Training completed. Best model at epoch {best_epoch} with validation loss {best_val_loss:.6f}")
@@ -577,6 +601,14 @@ def evaluate_bilstm(model, test_loader, device, pattern_offsets=[-7, 0, 3],
         print(f"MAE: {mae:.6f}")
         print(f"R²: {r2:.6f}")
         
+        # Log test metrics to wandb
+        wandb.log({
+            "test_loss": test_loss,
+            "test_mse": mse,
+            "test_mae": mae,
+            "test_r2": r2
+        })
+        
         # Plot example predictions
         plot_predictions(all_predictions, all_targets, output_dir)
         
@@ -585,6 +617,14 @@ def evaluate_bilstm(model, test_loader, device, pattern_offsets=[-7, 0, 3],
         
         print(f"Systolic MAE: {sys_mae:.2f} mmHg (mean error: {sys_error:.2f})")
         print(f"Diastolic MAE: {dias_mae:.2f} mmHg (mean error: {dias_error:.2f})")
+        
+        # Log BP metrics to wandb
+        wandb.log({
+            "systolic_mae": sys_mae,
+            "systolic_error": sys_error,
+            "diastolic_mae": dias_mae,
+            "diastolic_error": dias_error
+        })
         
         return test_loss, mse, mae, r2, sys_mae, dias_mae
     else:
@@ -622,6 +662,10 @@ def plot_predictions(predictions, targets, output_dir, num_examples=5):
     
     plt.tight_layout()
     plt.savefig(os.path.join(results_dir, 'bp_predictions.png'), dpi=150)
+    
+    # Log prediction examples to wandb
+    wandb.log({"prediction_examples": wandb.Image(plt)})
+    
     plt.close()
 
 
@@ -683,9 +727,15 @@ def calculate_bp_metrics(predictions, targets, output_dir):
     
     plt.tight_layout()
     plt.savefig(os.path.join(results_dir, 'bp_bland_altman.png'), dpi=150)
+    
+    # Log Bland-Altman plots to wandb
+    wandb.log({"bland_altman_plots": wandb.Image(plt)})
+    
     plt.close()
     
     return sys_mae, sys_error, dias_mae, dias_error
+
+
 def improved_evaluation(model, test_loader, device, pattern_offsets=[-7, 0, 3], bp_norm_params=(40, 200), output_dir=None):
     """Enhanced evaluation with correlation coefficients and improved plotting"""
     
@@ -766,6 +816,18 @@ def improved_evaluation(model, test_loader, device, pattern_offsets=[-7, 0, 3], 
         print(f"Systolic MAE: {sys_mae:.2f} mmHg, Pearson: {sys_pearson:.4f}")
         print(f"Diastolic MAE: {dias_mae:.2f} mmHg, Pearson: {dias_pearson:.4f}")
         
+        # Log metrics to wandb
+        wandb.log({
+            "test_mse": mse,
+            "test_mae": mae,
+            "test_r2": r2,
+            "test_pearson": pearson_r,
+            "test_systolic_mae": sys_mae,
+            "test_diastolic_mae": dias_mae,
+            "test_systolic_pearson": sys_pearson,
+            "test_diastolic_pearson": dias_pearson
+        })
+        
         return mse, mae, r2, pearson_r, sys_mae, dias_mae, sys_pearson, dias_pearson
     else:
         print("No valid predictions were made during evaluation")
@@ -819,6 +881,10 @@ def plot_prediction_vs_reference(targets, predictions, label, output_dir):
     
     # Save figure
     plt.savefig(os.path.join(results_dir, f'{label.lower()}_prediction_vs_reference.png'), dpi=300)
+    
+    # Log to wandb
+    wandb.log({f"{label.lower()}_prediction_vs_reference": wandb.Image(plt)})
+    
     plt.close()
 
 
@@ -842,8 +908,36 @@ def main():
                         help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size for training')
+    parser.add_argument('--wandb_project', type=str, default='vae-bilstm-bp',
+                        help='Weights & Biases project name')
+    parser.add_argument('--wandb_name', type=str, default=None,
+                        help='Weights & Biases run name')
+    parser.add_argument('--wandb_mode', type=str, default='offline',
+                        choices=['online', 'offline', 'disabled'],
+                        help='Weights & Biases mode')
     
     args = parser.parse_args()
+    
+    # Initialize wandb
+    wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_name,
+        config={
+            "latent_dim": args.latent_dim,
+            "lstm_hidden_dim": args.lstm_hidden_dim,
+            "lstm_layers": args.lstm_layers,
+            "num_epochs": args.num_epochs,
+            "batch_size": args.batch_size,
+            "pattern_offsets": [-7, 0, 3],
+            "bp_norm_params": (40, 200),
+            "learning_rate": 1e-3,
+            "weight_decay": 1e-5,
+            "dropout": 0.3,
+            "data_path": args.data_path,
+            "output_dir": args.output_dir
+        },
+        mode=args.wandb_mode
+    )
     
     # Create output directory and subdirectories
     os.makedirs(args.output_dir, exist_ok=True)
@@ -871,6 +965,7 @@ def main():
     # Set up device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    wandb.config.update({"device": str(device)})
     
     # Set hyperparameters
     latent_dim = args.latent_dim
@@ -890,6 +985,7 @@ def main():
     print(f"Loading dataset from: {args.data_path}")
     dataset = PviDataset(args.data_path)
     print(f"Dataset loaded with {len(dataset)} samples")
+    wandb.config.update({"dataset_size": len(dataset)})
     
     # Create batch server
     batch_server = PviBatchServer(dataset, input_type="img", output_type="full")
@@ -935,6 +1031,7 @@ def main():
     ).to(device)
     
     print(f"BiLSTM model created with {sum(p.numel() for p in bilstm_model.parameters() if p.requires_grad):,} trainable parameters")
+    wandb.config.update({"trainable_parameters": sum(p.numel() for p in bilstm_model.parameters() if p.requires_grad)})
     
     # Train the BiLSTM model
     best_epoch, best_val_loss = train_bilstm(
@@ -1020,6 +1117,9 @@ def main():
             f.write("No valid predictions were made during evaluation\n")
     
     print(f"Evaluation metrics saved to {results_file}")
+    
+    # Finish wandb run
+    wandb.finish()
 
 
 if __name__ == "__main__":
