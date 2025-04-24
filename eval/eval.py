@@ -9,6 +9,7 @@ import argparse
 from tqdm import tqdm
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import wandb
+from datetime import datetime
 
 # Add the parent directory to the path to find utils
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -394,8 +395,37 @@ def evaluate_model(model, data_loader, device, pattern_offsets=[-7, 0, 3],
         sys_bias = np.mean(sys_targets - sys_preds)
         dias_bias = np.mean(dias_targets - dias_preds)
         
+        # Calculate Pearson correlation coefficients
+        # For entire waveforms (flattened)
+        waveform_pearson_r = np.corrcoef(all_targets.flatten(), all_predictions.flatten())[0, 1]
+        waveform_r2 = r2_score(all_targets.flatten(), all_predictions.flatten())
+        
+        # For systolic values
+        systolic_pearson_r = np.corrcoef(sys_targets, sys_preds)[0, 1]
+        systolic_r2 = r2_score(sys_targets, sys_preds)
+        
+        # For diastolic values
+        diastolic_pearson_r = np.corrcoef(dias_targets, dias_preds)[0, 1]
+        diastolic_r2 = r2_score(dias_targets, dias_preds)
+        
+        # Calculate additional metrics
+        waveform_mae = mean_absolute_error(all_targets.flatten(), all_predictions.flatten())
+        waveform_mse = mean_squared_error(all_targets.flatten(), all_predictions.flatten())
+        
+        print("\n=== EVALUATION RESULTS ===")
         print(f"Systolic MAE: {sys_mae:.2f} mmHg, Bias: {sys_bias:.2f}")
         print(f"Diastolic MAE: {dias_mae:.2f} mmHg, Bias: {dias_bias:.2f}")
+        print(f"\nWaveform metrics:")
+        print(f"  MAE: {waveform_mae:.2f}")
+        print(f"  MSE: {waveform_mse:.2f}")
+        print(f"  Pearson r: {waveform_pearson_r:.4f}")
+        print(f"  R²: {waveform_r2:.4f}")
+        print(f"\nSystolic metrics:")
+        print(f"  Pearson r: {systolic_pearson_r:.4f}")
+        print(f"  R²: {systolic_r2:.4f}")
+        print(f"\nDiastolic metrics:")
+        print(f"  Pearson r: {diastolic_pearson_r:.4f}")
+        print(f"  R²: {diastolic_r2:.4f}")
         
         # Create proper Bland-Altman plots
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -438,7 +468,323 @@ def evaluate_model(model, data_loader, device, pattern_offsets=[-7, 0, 3],
         plt.savefig(os.path.join(results_dir, 'corrected_bland_altman.png'), dpi=300)
         plt.close()
         
+        # Create scatter plots with correlation
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        # Systolic scatter plot
+        axes[0].scatter(sys_targets, sys_preds, alpha=0.5)
+        axes[0].plot([sys_targets.min(), sys_targets.max()], 
+                     [sys_targets.min(), sys_targets.max()], 'r--', label='Identity line')
+        axes[0].set_xlabel('True Systolic BP (mmHg)')
+        axes[0].set_ylabel('Predicted Systolic BP (mmHg)')
+        axes[0].set_title(f'Systolic BP (r={systolic_pearson_r:.3f}, R²={systolic_r2:.3f})')
+        axes[0].legend()
+        axes[0].grid(True)
+        
+        # Diastolic scatter plot
+        axes[1].scatter(dias_targets, dias_preds, alpha=0.5)
+        axes[1].plot([dias_targets.min(), dias_targets.max()], 
+                     [dias_targets.min(), dias_targets.max()], 'r--', label='Identity line')
+        axes[1].set_xlabel('True Diastolic BP (mmHg)')
+        axes[1].set_ylabel('Predicted Diastolic BP (mmHg)')
+        axes[1].set_title(f'Diastolic BP (r={diastolic_pearson_r:.3f}, R²={diastolic_r2:.3f})')
+        axes[1].legend()
+        axes[1].grid(True)
+        
+        # Waveform scatter plot (sample every 5th point for clarity)
+        flat_targets = all_targets.flatten()[::5]
+        flat_preds = all_predictions.flatten()[::5]
+        axes[2].scatter(flat_targets, flat_preds, alpha=0.1)
+        axes[2].plot([flat_targets.min(), flat_targets.max()], 
+                     [flat_targets.min(), flat_targets.max()], 'r--', label='Identity line')
+        axes[2].set_xlabel('True BP (mmHg)')
+        axes[2].set_ylabel('Predicted BP (mmHg)')
+        axes[2].set_title(f'All BP values (r={waveform_pearson_r:.3f}, R²={waveform_r2:.3f})')
+        axes[2].legend()
+        axes[2].grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(results_dir, 'correlation_scatter_plots.png'), dpi=300)
+        plt.close()
+        
         # Create a visualization showing the distribution of predictions vs targets
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Systolic
+        axes[0].hist(sys_targets, bins=30, alpha=0.5, label='Target', density=True)
+        axes[0].hist(sys_preds, bins=30, alpha=0.5, label='Predicted', density=True)
+        axes[0].set_xlabel('Systolic BP (mmHg)')
+        axes[0].set_ylabel('Density')
+        axes[0].set_title('Distribution of Systolic Blood Pressure')
+        axes[0].legend()
+        axes[0].grid(True)
+        
+        # Diastolic
+        axes[1].hist(dias_targets, bins=30, alpha=0.5, label='Target', density=True)
+        axes[1].hist(dias_preds, bins=30, alpha=0.5, label='Predicted', density=True)
+        axes[1].set_xlabel('Diastolic BP (mmHg)')
+        axes[1].set_ylabel('Density')
+        axes[1].set_title('Distribution of Diastolic Blood Pressure')
+        axes[1].legend()
+        axes[1].grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(results_dir, 'bp_distributions.png'), dpi=300)
+        plt.close()
+        
+        # Create comprehensive 9-panel figure like the reference image
+        fig = plt.figure(figsize=(18, 15))
+        gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+        
+        # Full waveform analysis
+        # Predicted vs True for full waveform
+        ax1 = fig.add_subplot(gs[0, 0])
+        flat_targets = all_targets.flatten()
+        flat_preds = all_predictions.flatten()
+        ax1.scatter(flat_targets, flat_preds, alpha=0.05, s=1)
+        ax1.plot([flat_targets.min(), flat_targets.max()], 
+                [flat_targets.min(), flat_targets.max()], 'k-', linewidth=2)
+        ax1.set_xlabel('True FULL (mmHg)')
+        ax1.set_ylabel('Predicted FULL (mmHg)')
+        ax1.text(0.05, 0.95, f'r2={waveform_r2:.4f}\np={0.0000:.4f}', 
+                transform=ax1.transAxes, verticalalignment='top')
+        
+        # Bland-Altman for full waveform
+        ax2 = fig.add_subplot(gs[0, 1])
+        mean_full = (flat_targets + flat_preds) / 2
+        diff_full = flat_targets - flat_preds
+        ax2.scatter(mean_full, diff_full, alpha=0.05, s=1)
+        mean_diff = np.mean(diff_full)
+        std_diff = np.std(diff_full)
+        ax2.axhline(y=mean_diff, color='r', linestyle='-', label=f'MEAN DIFF: {mean_diff:.2f}')
+        ax2.axhline(y=mean_diff + 1.96*std_diff, color='b', linestyle='--', 
+                   label=f'+1.96 SD: {mean_diff + 1.96*std_diff:.2f}')
+        ax2.axhline(y=mean_diff - 1.96*std_diff, color='b', linestyle='--', 
+                   label=f'-1.96 SD: {mean_diff - 1.96*std_diff:.2f}')
+        ax2.set_xlabel('Means (mmHg)')
+        ax2.set_ylabel('Difference (mmHg)')
+        ax2.legend()
+        
+        # Histogram for full waveform absolute errors
+        ax3 = fig.add_subplot(gs[0, 2])
+        abs_errors_full = np.abs(diff_full)
+        ax3.hist(abs_errors_full, bins=50, alpha=0.7, color='#1f77b4', edgecolor='black')
+        
+        # Add vertical lines for statistics
+        mean_abs_error = np.mean(abs_errors_full)
+        sd_abs_error = np.std(abs_errors_full)
+        tolerance_levels = [5, 10, 15]  # Tolerance levels in mmHg
+        
+        ax3.axvline(x=mean_abs_error, color='black', linestyle='-', linewidth=2)
+        
+        for tol in tolerance_levels:
+            ax3.axvline(x=tol, color='gray', linestyle='--')
+        
+        ax3.set_xlabel('Absolute error (mmHg)')
+        ax3.set_ylabel('Occurrences')
+        
+        # Calculate percentage of errors within tolerance levels
+        tolerance_percentages = []
+        for tol in tolerance_levels:
+            percentage = np.mean(abs_errors_full <= tol) * 100
+            tolerance_percentages.append(percentage)
+        
+        ax3.text(0.98, 0.98, f'mean: {mean_abs_error:.2f}\nsd: {sd_abs_error:.2f}\n' +
+                '\n'.join([f'{tol}-tol: {perc:.2f} %' for tol, perc in zip(tolerance_levels, tolerance_percentages)]),
+                transform=ax3.transAxes, verticalalignment='top', horizontalalignment='right', 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # Systolic BP analysis
+        # Predicted vs True for SBP
+        ax4 = fig.add_subplot(gs[1, 0])
+        ax4.scatter(sys_targets, sys_preds, alpha=0.5, s=10)
+        ax4.plot([sys_targets.min(), sys_targets.max()], 
+                [sys_targets.min(), sys_targets.max()], 'k-', linewidth=2)
+        ax4.set_xlabel('True SBP (mmHg)')
+        ax4.set_ylabel('Predicted SBP (mmHg)')
+        ax4.text(0.05, 0.95, f'r2={systolic_r2:.4f}\np={0.0000:.4f}', 
+                transform=ax4.transAxes, verticalalignment='top')
+        
+        # Bland-Altman for SBP
+        ax5 = fig.add_subplot(gs[1, 1])
+        mean_sys = (sys_targets + sys_preds) / 2
+        diff_sys = sys_targets - sys_preds
+        ax5.scatter(mean_sys, diff_sys, alpha=0.5, s=10)
+        mean_diff_sys = np.mean(diff_sys)
+        std_diff_sys = np.std(diff_sys)
+        ax5.axhline(y=mean_diff_sys, color='r', linestyle='-', label=f'MEAN DIFF: {mean_diff_sys:.2f}')
+        ax5.axhline(y=mean_diff_sys + 1.96*std_diff_sys, color='b', linestyle='--', 
+                   label=f'+1.96 SD: {mean_diff_sys + 1.96*std_diff_sys:.2f}')
+        ax5.axhline(y=mean_diff_sys - 1.96*std_diff_sys, color='b', linestyle='--', 
+                   label=f'-1.96 SD: {mean_diff_sys - 1.96*std_diff_sys:.2f}')
+        ax5.set_xlabel('Means (mmHg)')
+        ax5.set_ylabel('Difference (mmHg)')
+        ax5.legend()
+        
+        # Histogram for SBP absolute errors
+        ax6 = fig.add_subplot(gs[1, 2])
+        abs_errors_sys = np.abs(diff_sys)
+        ax6.hist(abs_errors_sys, bins=30, alpha=0.7, color='#1f77b4', edgecolor='black')
+        
+        mean_abs_error_sys = np.mean(abs_errors_sys)
+        sd_abs_error_sys = np.std(abs_errors_sys)
+        
+        ax6.axvline(x=mean_abs_error_sys, color='black', linestyle='-', linewidth=2)
+        
+        for tol in tolerance_levels:
+            ax6.axvline(x=tol, color='gray', linestyle='--')
+        
+        ax6.set_xlabel('Absolute error (mmHg)')
+        ax6.set_ylabel('Occurrences')
+        
+        # Calculate percentage of errors within tolerance levels for SBP
+        tolerance_percentages_sys = []
+        for tol in tolerance_levels:
+            percentage = np.mean(abs_errors_sys <= tol) * 100
+            tolerance_percentages_sys.append(percentage)
+        
+        ax6.text(0.98, 0.98, f'mean: {mean_abs_error_sys:.2f}\nsd: {sd_abs_error_sys:.2f}\n' +
+                '\n'.join([f'{tol}-tol: {perc:.2f} %' for tol, perc in zip(tolerance_levels, tolerance_percentages_sys)]),
+                transform=ax6.transAxes, verticalalignment='top', horizontalalignment='right', 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # Diastolic BP analysis
+        # Predicted vs True for DBP
+        ax7 = fig.add_subplot(gs[2, 0])
+        ax7.scatter(dias_targets, dias_preds, alpha=0.5, s=10)
+        ax7.plot([dias_targets.min(), dias_targets.max()], 
+                [dias_targets.min(), dias_targets.max()], 'k-', linewidth=2)
+        ax7.set_xlabel('True DBP (mmHg)')
+        ax7.set_ylabel('Predicted DBP (mmHg)')
+        ax7.text(0.05, 0.95, f'r2={diastolic_r2:.4f}\np={0.0000:.4f}', 
+                transform=ax7.transAxes, verticalalignment='top')
+        
+        # Bland-Altman for DBP
+        ax8 = fig.add_subplot(gs[2, 1])
+        mean_dias = (dias_targets + dias_preds) / 2
+        diff_dias = dias_targets - dias_preds
+        ax8.scatter(mean_dias, diff_dias, alpha=0.5, s=10)
+        mean_diff_dias = np.mean(diff_dias)
+        std_diff_dias = np.std(diff_dias)
+        ax8.axhline(y=mean_diff_dias, color='r', linestyle='-', label=f'MEAN DIFF: {mean_diff_dias:.2f}')
+        ax8.axhline(y=mean_diff_dias + 1.96*std_diff_dias, color='b', linestyle='--', 
+                   label=f'+1.96 SD: {mean_diff_dias + 1.96*std_diff_dias:.2f}')
+        ax8.axhline(y=mean_diff_dias - 1.96*std_diff_dias, color='b', linestyle='--', 
+                   label=f'-1.96 SD: {mean_diff_dias - 1.96*std_diff_dias:.2f}')
+        ax8.set_xlabel('Means (mmHg)')
+        ax8.set_ylabel('Difference (mmHg)')
+        ax8.legend()
+        
+        # Histogram for DBP absolute errors
+        ax9 = fig.add_subplot(gs[2, 2])
+        abs_errors_dias = np.abs(diff_dias)
+        ax9.hist(abs_errors_dias, bins=30, alpha=0.7, color='#1f77b4', edgecolor='black')
+        
+        mean_abs_error_dias = np.mean(abs_errors_dias)
+        sd_abs_error_dias = np.std(abs_errors_dias)
+        
+        ax9.axvline(x=mean_abs_error_dias, color='black', linestyle='-', linewidth=2)
+        
+        for tol in tolerance_levels:
+            ax9.axvline(x=tol, color='gray', linestyle='--')
+        
+        ax9.set_xlabel('Absolute error (mmHg)')
+        ax9.set_ylabel('Occurrences')
+        
+        # Calculate percentage of errors within tolerance levels for DBP
+        tolerance_percentages_dias = []
+        for tol in tolerance_levels:
+            percentage = np.mean(abs_errors_dias <= tol) * 100
+            tolerance_percentages_dias.append(percentage)
+        
+        ax9.text(0.98, 0.98, f'mean: {mean_abs_error_dias:.2f}\nsd: {sd_abs_error_dias:.2f}\n' +
+                '\n'.join([f'{tol}-tol: {perc:.2f} %' for tol, perc in zip(tolerance_levels, tolerance_percentages_dias)]),
+                transform=ax9.transAxes, verticalalignment='top', horizontalalignment='right', 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # Add title with model info
+        fig.suptitle(f'{datetime.now().strftime("%Y-%m-%d %H.%M.%S")} | model=VAEBiLSTM\n'
+                    f'baseline | subject 001-020 | #train={len(all_targets)} | #test={len(all_targets)}',
+                    fontsize=16, fontweight='bold')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(results_dir, 'comprehensive_evaluation.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Also save individual components as separate files for clarity
+        # Bland-Altman plots
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Systolic Bland-Altman
+        axes[0].scatter(mean_sys, diff_sys, alpha=0.5)
+        axes[0].axhline(y=np.mean(diff_sys), color='r', linestyle='-', 
+                       label=f'Mean Error: {np.mean(diff_sys):.2f}')
+        axes[0].axhline(y=np.mean(diff_sys) + 1.96*np.std(diff_sys), color='g', linestyle='--', 
+                       label=f'95% Limits: {np.mean(diff_sys) + 1.96*np.std(diff_sys):.2f}')
+        axes[0].axhline(y=np.mean(diff_sys) - 1.96*np.std(diff_sys), color='g', linestyle='--',
+                       label=f'{np.mean(diff_sys) - 1.96*np.std(diff_sys):.2f}')
+        axes[0].set_xlabel('Mean Systolic BP (mmHg)')
+        axes[0].set_ylabel('Difference (Target - Predicted)')
+        axes[0].set_title('Bland-Altman Plot for Systolic BP')
+        axes[0].legend()
+        axes[0].grid(True)
+        
+        # Diastolic Bland-Altman
+        axes[1].scatter(mean_dias, diff_dias, alpha=0.5)
+        axes[1].axhline(y=np.mean(diff_dias), color='r', linestyle='-', 
+                       label=f'Mean Error: {np.mean(diff_dias):.2f}')
+        axes[1].axhline(y=np.mean(diff_dias) + 1.96*np.std(diff_dias), color='g', linestyle='--', 
+                       label=f'95% Limits: {np.mean(diff_dias) + 1.96*np.std(diff_dias):.2f}')
+        axes[1].axhline(y=np.mean(diff_dias) - 1.96*np.std(diff_dias), color='g', linestyle='--',
+                       label=f'{np.mean(diff_dias) - 1.96*np.std(diff_dias):.2f}')
+        axes[1].set_xlabel('Mean Diastolic BP (mmHg)')
+        axes[1].set_ylabel('Difference (Target - Predicted)')
+        axes[1].set_title('Bland-Altman Plot for Diastolic BP')
+        axes[1].legend()
+        axes[1].grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(results_dir, 'corrected_bland_altman.png'), dpi=300)
+        plt.close()
+        
+        # Scatter plots with correlation
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        # Systolic scatter plot
+        axes[0].scatter(sys_targets, sys_preds, alpha=0.5)
+        axes[0].plot([sys_targets.min(), sys_targets.max()], 
+                     [sys_targets.min(), sys_targets.max()], 'r--', label='Identity line')
+        axes[0].set_xlabel('True Systolic BP (mmHg)')
+        axes[0].set_ylabel('Predicted Systolic BP (mmHg)')
+        axes[0].set_title(f'Systolic BP (r={systolic_pearson_r:.3f}, R²={systolic_r2:.3f})')
+        axes[0].legend()
+        axes[0].grid(True)
+        
+        # Diastolic scatter plot
+        axes[1].scatter(dias_targets, dias_preds, alpha=0.5)
+        axes[1].plot([dias_targets.min(), dias_targets.max()], 
+                     [dias_targets.min(), dias_targets.max()], 'r--', label='Identity line')
+        axes[1].set_xlabel('True Diastolic BP (mmHg)')
+        axes[1].set_ylabel('Predicted Diastolic BP (mmHg)')
+        axes[1].set_title(f'Diastolic BP (r={diastolic_pearson_r:.3f}, R²={diastolic_r2:.3f})')
+        axes[1].legend()
+        axes[1].grid(True)
+        
+        # Waveform scatter plot (sample every 5th point for clarity)
+        axes[2].scatter(flat_targets[::5], flat_preds[::5], alpha=0.1)
+        axes[2].plot([flat_targets.min(), flat_targets.max()], 
+                     [flat_targets.min(), flat_targets.max()], 'r--', label='Identity line')
+        axes[2].set_xlabel('True BP (mmHg)')
+        axes[2].set_ylabel('Predicted BP (mmHg)')
+        axes[2].set_title(f'All BP values (r={waveform_pearson_r:.3f}, R²={waveform_r2:.3f})')
+        axes[2].legend()
+        axes[2].grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(results_dir, 'correlation_scatter_plots.png'), dpi=300)
+        plt.close()
+        
+        # Create distribution plots
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         
         # Systolic
@@ -474,7 +820,15 @@ def evaluate_model(model, data_loader, device, pattern_offsets=[-7, 0, 3],
             'systolic_predictions': sys_preds,
             'systolic_targets': sys_targets,
             'diastolic_predictions': dias_preds,
-            'diastolic_targets': dias_targets
+            'diastolic_targets': dias_targets,
+            'waveform_pearson_r': waveform_pearson_r,
+            'waveform_r2': waveform_r2,
+            'systolic_pearson_r': systolic_pearson_r,
+            'systolic_r2': systolic_r2,
+            'diastolic_pearson_r': diastolic_pearson_r,
+            'diastolic_r2': diastolic_r2,
+            'waveform_mae': waveform_mae,
+            'waveform_mse': waveform_mse
         }
     else:
         print("No valid predictions were made")
@@ -555,6 +909,20 @@ def main():
             f.write(f"Systolic Bias: {results['systolic_bias']:.2f} mmHg\n")
             f.write(f"Diastolic MAE: {results['diastolic_mae']:.2f} mmHg\n")
             f.write(f"Diastolic Bias: {results['diastolic_bias']:.2f} mmHg\n")
+            
+            f.write(f"\nFull Waveform Metrics:\n")
+            f.write(f"MAE: {results['waveform_mae']:.2f}\n")
+            f.write(f"MSE: {results['waveform_mse']:.2f}\n")
+            f.write(f"Pearson r: {results['waveform_pearson_r']:.4f}\n")
+            f.write(f"R²: {results['waveform_r2']:.4f}\n")
+            
+            f.write(f"\nSystolic Metrics:\n")
+            f.write(f"Pearson r: {results['systolic_pearson_r']:.4f}\n")
+            f.write(f"R²: {results['systolic_r2']:.4f}\n")
+            
+            f.write(f"\nDiastolic Metrics:\n")
+            f.write(f"Pearson r: {results['diastolic_pearson_r']:.4f}\n")
+            f.write(f"R²: {results['diastolic_r2']:.4f}\n")
         
         print(f"Evaluation complete. Results saved to {args.output_dir}")
 
