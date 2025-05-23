@@ -83,7 +83,7 @@ class VAE(nn.Module):
         x = F.relu(self.bn_dec2(self.deconv2(x)))
         x = self.dropout(x)  # Apply dropout
         x = F.relu(self.bn_dec3(self.deconv3(x)))
-        x = torch.tanh(self.deconv4(x))
+        x = torch.sigmoid(self.deconv4(x))
         
         return x
     
@@ -94,9 +94,96 @@ class VAE(nn.Module):
         return x_recon, mu, logvar
 
 
-# Extract and normalize a specific frame from each sample
-def extract_frame(batch_data, frame_idx=0):
-    """Extract a specific frame from the batch data and normalize it to [0, 1]"""
+def compute_global_normalization_stats(dataset, batch_server, frame_indices, device):
+    """Compute global min and max statistics from the entire dataset"""
+    print("Computing global normalization statistics from training data...")
+    
+    global_min = float('inf')
+    global_max = float('-inf')
+    total_samples = 0
+    
+    # Process all data directly from dataset to find global min/max
+    for sample_idx in tqdm(range(len(dataset)), desc="Computing global stats"):
+        try:
+            # Get sample directly from dataset
+            sample = dataset[sample_idx]
+            
+            for frame_idx in frame_indices:
+                try:
+                    # Extract raw frames without normalization
+                    if isinstance(sample, dict):
+                        pvi_data = sample['pviHP']
+                    else:
+                        pvi_data = sample
+                    
+                    # Debug: print shape for first few samples
+                    if sample_idx < 3 and frame_idx == frame_indices[0]:
+                        print(f"Sample {sample_idx} pvi_data shape: {pvi_data.shape}")
+                    
+                    # Handle different possible shapes
+                    # Expected shape: [channels, height, width, frames] for single sample
+                    # or [batch, channels, height, width, frames] if batch dimension exists
+                    if len(pvi_data.shape) == 5:  # [batch, channels, height, width, frames]
+                        frame = pvi_data[0, 0, :, :, frame_idx]
+                    elif len(pvi_data.shape) == 4:  # [channels, height, width, frames]
+                        frame = pvi_data[0, :, :, frame_idx]
+                    else:
+                        print(f"Unexpected pvi_data shape: {pvi_data.shape}")
+                        continue
+                    
+                    # Convert to tensor if needed
+                    if not isinstance(frame, torch.Tensor):
+                        frame = torch.tensor(frame)
+                    
+                    # Replace NaN values with zeros
+                    frame = torch.nan_to_num(frame, nan=0.0)
+                    
+                    # Skip if frame is empty or all zeros
+                    if frame.numel() == 0 or torch.all(frame == 0):
+                        continue
+                    
+                    # Update global statistics
+                    frame_min = frame.min().item()
+                    frame_max = frame.max().item()
+                    
+                    global_min = min(global_min, frame_min)
+                    global_max = max(global_max, frame_max)
+                    total_samples += 1
+                    
+                except Exception as e:
+                    if sample_idx < 5:  # Only print errors for first few samples to avoid spam
+                        print(f"Error processing sample {sample_idx}, frame {frame_idx}: {e}")
+                    continue
+                    
+        except Exception as e:
+            if sample_idx < 5:
+                print(f"Error processing sample {sample_idx}: {e}")
+            continue
+    
+    # Handle edge case where min == max or no valid samples
+    if global_min == float('inf') or global_max == float('-inf') or global_min == global_max:
+        print("Warning: No valid data found or global min equals global max. Setting range to [0, 1]")
+        global_min = 0.0
+        global_max = 1.0
+    
+    global_stats = {
+        'min': global_min,
+        'max': global_max,
+        'range': global_max - global_min,
+        'total_samples': total_samples
+    }
+    
+    print(f"Global statistics computed:")
+    print(f"  Min: {global_min:.6f}")
+    print(f"  Max: {global_max:.6f}")
+    print(f"  Range: {global_max - global_min:.6f}")
+    print(f"  Total samples processed: {total_samples}")
+    
+    return global_stats
+
+
+def extract_frame_raw(batch_data, frame_idx=0):
+    """Extract a specific frame from the batch data without normalization"""
     if isinstance(batch_data, dict):
         # If batch is a dictionary (like in your debug output)
         pvi_data = batch_data['pviHP']
@@ -111,38 +198,43 @@ def extract_frame(batch_data, frame_idx=0):
     # Replace NaN values with zeros
     frames = torch.nan_to_num(frames, nan=0.0)
     
-
-    # Normalize to [0, 1] range for each sample individually
-    # First find min and max per sample
-    # batch_size = frames.shape[0]
-    # normalized_frames = torch.zeros_like(frames)
-    
-    # for i in range(batch_size):
-    #     sample = frames[i]
-    #     min_val = torch.min(sample)
-    #     max_val = torch.max(sample)
-        
-    #     # Handle case where min == max (constant value)
-    #     if min_val == max_val:
-    #         normalized_frames[i] = torch.zeros_like(sample)
-    #     else:
-    #         # Normalize to [0, 1]
-    #         normalized_frames[i] = (sample - min_val) / (max_val - min_val)
-    
-    # return normalized_frames
-
     return frames
 
 
-# Loss function with KL weight (beta)
-def vae_loss(recon_x, x, mu, logvar, beta):
-    """VAE loss = reconstruction loss + beta * KL divergence"""
-    # Ensure inputs are valid for tanh range (between -1 and 1)
-    x = torch.clamp(x, -1.0, 1.0)
-    recon_x = torch.clamp(recon_x, -1.0, 1.0)
+def extract_frame_global_norm(batch_data, frame_idx=0, global_stats=None):
+    """Extract a specific frame from the batch data and apply global normalization"""
+    if global_stats is None:
+        raise ValueError("Global statistics must be provided for normalization")
     
-    # MSE loss - works well with tanh's [-1, 1] range
-    recon_loss = F.mse_loss(recon_x, x, reduction='sum') * 100  # Scale factor to make comparable to BCE
+    # Get raw frames
+    frames = extract_frame_raw(batch_data, frame_idx)
+    
+    # Apply global normalization to preserve relative scales across samples
+    normalized_frames = (frames - global_stats['min']) / global_stats['range']
+    
+    # Clamp to [0, 1] to handle any numerical issues
+    normalized_frames = torch.clamp(normalized_frames, 0.0, 1.0)
+    
+    return normalized_frames
+
+
+# Loss function with improved MSE scaling
+def vae_loss(recon_x, x, mu, logvar, beta, reconstruction_loss_type='mse'):
+    """VAE loss = reconstruction loss + beta * KL divergence"""
+    # Ensure inputs are valid (between 0 and 1)
+    x = torch.clamp(x, 0.0, 1.0)
+    recon_x = torch.clamp(recon_x, 0.0, 1.0)
+    
+    # Reconstruction loss - choose between MSE and BCE
+    if reconstruction_loss_type == 'mse':
+        # MSE loss without arbitrary scaling factor
+        # Scale by image dimensions to make loss magnitude reasonable
+        recon_loss = F.mse_loss(recon_x, x, reduction='sum')
+    elif reconstruction_loss_type == 'bce':
+        # Binary cross entropy for truly binary data
+        recon_loss = F.binary_cross_entropy(recon_x, x, reduction='sum')
+    else:
+        raise ValueError("reconstruction_loss_type must be 'mse' or 'bce'")
     
     # KL divergence
     kl_div = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
@@ -154,15 +246,15 @@ def vae_loss(recon_x, x, mu, logvar, beta):
 
 
 # Visualize reconstructions and save the figure
-def visualize_reconstructions(model, test_data, device, frame_idx=0, num_images=5, epoch=0, output_dir=None):
+def visualize_reconstructions(model, test_data, device, global_stats, frame_idx=0, num_images=5, epoch=0, output_dir=None):
     reconstructions_dir = os.path.join(output_dir, 'reconstructions')
     
     model.eval()
     
     # Get a batch from test data
     with torch.no_grad():
-        # Extract and normalize the specific frame
-        frames = extract_frame(test_data, frame_idx).to(device)
+        # Extract and normalize the specific frame using global stats
+        frames = extract_frame_global_norm(test_data, frame_idx, global_stats).to(device)
         
         # Limit to num_images
         frames = frames[:num_images]
@@ -252,12 +344,13 @@ def main():
                         help='Number of training epochs')
     parser.add_argument('--beta_min', type=float, default=0.01,
                         help='Minimum beta value for KL divergence weight')
-    parser.add_argument('--lr', type=float, default=1e-3,
-                        help='Start learning rate')
     parser.add_argument('--beta_max', type=float, default=1.0,
                         help='Maximum beta value for KL divergence weight')
     parser.add_argument('--beta_warmup_epochs', type=int, default=15,  # Increased warmup period
                         help='Number of epochs to warm up beta')
+    parser.add_argument('--reconstruction_loss', type=str, default='mse',
+                        choices=['mse', 'bce'],
+                        help='Type of reconstruction loss (mse or bce)')
     parser.add_argument('--wandb_project', type=str, default='vae-pvi',
                         help='Weights & Biases project name')
     parser.add_argument('--wandb_name', type=str, default=None,
@@ -275,7 +368,7 @@ def main():
         config={
             "latent_dim": args.latent_dim,
             "num_epochs": args.num_epochs,
-            "initial_lr": args.lr,
+            "initial_lr": 1e-3,
             "beta_min": args.beta_min,
             "beta_max": args.beta_max,
             "beta_warmup_epochs": args.beta_warmup_epochs,
@@ -283,6 +376,8 @@ def main():
             "weight_decay": 1e-5,
             "dropout": 0.2,
             "frame_indices": [0, 100, 200, 300, 400],
+            "reconstruction_loss": args.reconstruction_loss,
+            "normalization": "global",
             "data_path": args.data_path,
             "output_dir": args.output_dir
         },
@@ -307,7 +402,7 @@ def main():
     # Set hyperparameters
     latent_dim = args.latent_dim
     num_epochs = args.num_epochs
-    initial_lr = args.lr
+    initial_lr = 1e-3
     initial_beta = args.beta_min
     final_beta = args.beta_max
     beta_warmup_epochs = args.beta_warmup_epochs
@@ -323,7 +418,21 @@ def main():
     print(f"Dataset loaded with {len(dataset)} samples")
     wandb.config.update({"dataset_size": len(dataset)})
     
-    # Create batch server
+    # Choose frames to use for training (multiple frames for more data)
+    frame_indices = [0, 100, 200, 300, 400]  # Sample frames from different parts of the sequence
+    
+    # Compute global normalization statistics BEFORE creating the main batch server
+    print("Computing global normalization statistics...")
+    global_stats = compute_global_normalization_stats(dataset, None, frame_indices, device)
+    
+    # Log global stats to wandb
+    wandb.config.update({
+        "global_min": global_stats['min'],
+        "global_max": global_stats['max'],
+        "global_range": global_stats['range']
+    })
+    
+    # Create batch server for training/validation split
     batch_server = PviBatchServer(dataset, input_type="img", output_type="full")
     
     # Set batch size using the correct method
@@ -348,9 +457,6 @@ def main():
         T_max=num_epochs,  # Full cycle length equals total training epochs
         eta_min=1e-6       # Minimum learning rate
     )
-    
-    # Choose frames to use for training (multiple frames for more data)
-    frame_indices = [0, 100, 200, 300, 400]  # Sample frames from different parts of the sequence
     
     # For recording losses
     epoch_losses = []
@@ -386,15 +492,15 @@ def main():
         for batch_idx, batch_data in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}")):
             for frame_idx in frame_indices:
                 try:
-                    # Extract and normalize frames from this batch
-                    frames = extract_frame(batch_data, frame_idx).to(device)
+                    # Extract and normalize frames using global stats
+                    frames = extract_frame_global_norm(batch_data, frame_idx, global_stats).to(device)
                     
                     # Forward pass
                     optimizer.zero_grad()
                     recon_batch, mu, logvar = model(frames)
                     
                     # Calculate loss with current beta
-                    loss, recon, kl = vae_loss(recon_batch, frames, mu, logvar, beta)
+                    loss, recon, kl = vae_loss(recon_batch, frames, mu, logvar, beta, args.reconstruction_loss)
                     
                     # Backward pass
                     loss.backward()
@@ -439,14 +545,14 @@ def main():
             for batch_idx, batch_data in enumerate(tqdm(test_loader, desc=f"Validation Epoch {epoch}")):
                 for frame_idx in frame_indices:
                     try:
-                        # Extract and normalize frames from this batch
-                        frames = extract_frame(batch_data, frame_idx).to(device)
+                        # Extract and normalize frames using global stats
+                        frames = extract_frame_global_norm(batch_data, frame_idx, global_stats).to(device)
                         
                         # Forward pass
                         recon_batch, mu, logvar = model(frames)
                         
                         # Calculate loss with current beta
-                        loss, recon, kl = vae_loss(recon_batch, frames, mu, logvar, beta)
+                        loss, recon, kl = vae_loss(recon_batch, frames, mu, logvar, beta, args.reconstruction_loss)
                         
                         # Accumulate losses
                         val_loss += loss.item()
@@ -498,7 +604,9 @@ def main():
                 'scheduler_state_dict': scheduler.state_dict(),
                 'loss': avg_loss,
                 'beta': beta,
-                'latent_dim': latent_dim
+                'latent_dim': latent_dim,
+                'global_stats': global_stats,  # Save global stats with model
+                'reconstruction_loss_type': args.reconstruction_loss
             }
             print(f"New best model at epoch {epoch} with loss {best_loss:.4f}")
             
@@ -509,7 +617,7 @@ def main():
         # Visualize reconstructions on first epoch
         if epoch == 1:
             test_batch = next(iter(test_loader))
-            visualize_reconstructions(model, test_batch, device, frame_idx=200, epoch=epoch, output_dir=args.output_dir)
+            visualize_reconstructions(model, test_batch, device, global_stats, frame_idx=200, epoch=epoch, output_dir=args.output_dir)
             
         # Save checkpoint only every 5 epochs or at the last epoch
         if epoch % 5 == 0 or epoch == num_epochs:
@@ -520,13 +628,15 @@ def main():
                 'scheduler_state_dict': scheduler.state_dict(),
                 'loss': avg_loss,
                 'beta': beta,
-                'latent_dim': latent_dim
+                'latent_dim': latent_dim,
+                'global_stats': global_stats,  # Save global stats with checkpoint
+                'reconstruction_loss_type': args.reconstruction_loss
             }, os.path.join(checkpoints_dir, f'vae_epoch_{epoch}.pt'))
             
             # Visualize reconstructions every 5 epochs or last epoch
             if epoch != 1:  # Skip if already done on first epoch
                 test_batch = next(iter(test_loader))
-                visualize_reconstructions(model, test_batch, device, frame_idx=200, epoch=epoch, output_dir=args.output_dir)
+                visualize_reconstructions(model, test_batch, device, global_stats, frame_idx=200, epoch=epoch, output_dir=args.output_dir)
     
     # Save the best model at the end of training
     if best_model_state is not None:
@@ -537,6 +647,11 @@ def main():
         model_artifact = wandb.Artifact('vae_model', type='model')
         model_artifact.add_file(os.path.join(checkpoints_dir, 'vae_best.pt'))
         wandb.log_artifact(model_artifact)
+    
+    # Save global stats separately for easy access
+    import json
+    with open(os.path.join(checkpoints_dir, 'global_stats.json'), 'w') as f:
+        json.dump(global_stats, f, indent=2)
     
     # Plot loss curves
     plt.figure(figsize=(20, 10))
@@ -594,16 +709,19 @@ def main():
     plt.title('Beta vs. Epoch')
     plt.grid(True)
     
-    # Train vs Val Loss Scatter
-    # plt.subplot(2, 3, 6)
-    # plt.scatter(epoch_losses, val_losses, c=range(1, num_epochs + 1), cmap='viridis')
-    # plt.plot([min(epoch_losses), max(epoch_losses)], [min(epoch_losses), max(epoch_losses)], 'r--', label='y=x')
-    # plt.xlabel('Training Loss')
-    # plt.ylabel('Validation Loss')
-    # plt.title('Training vs Validation Loss')
-    # plt.colorbar(label='Epoch')
-    # plt.legend()
-    # plt.grid(True)
+    # Global Normalization Info
+    plt.subplot(2, 3, 6)
+    plt.text(0.1, 0.8, f"Global Statistics:", fontsize=12, fontweight='bold')
+    plt.text(0.1, 0.7, f"Min: {global_stats['min']:.6f}", fontsize=10)
+    plt.text(0.1, 0.6, f"Max: {global_stats['max']:.6f}", fontsize=10)
+    plt.text(0.1, 0.5, f"Range: {global_stats['range']:.6f}", fontsize=10)
+    plt.text(0.1, 0.4, f"Samples: {global_stats['total_samples']}", fontsize=10)
+    plt.text(0.1, 0.3, f"Reconstruction Loss: {args.reconstruction_loss.upper()}", fontsize=10)
+    plt.text(0.1, 0.2, f"Normalization: Global", fontsize=10)
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.axis('off')
+    plt.title('Training Configuration')
     
     plt.tight_layout()
     plt.savefig(os.path.join(results_dir, 'training_curves.png'), dpi=150)
@@ -615,11 +733,13 @@ def main():
     
     print("Training completed!")
     print(f"Best model was at epoch {best_epoch} with loss {best_loss:.4f}")
+    print(f"Global normalization stats: min={global_stats['min']:.6f}, max={global_stats['max']:.6f}")
     
     # Print directories
     print(f"All checkpoints saved in: {os.path.abspath(checkpoints_dir)}")
     print(f"All reconstructions saved in: {os.path.abspath(reconstructions_dir)}")
     print(f"Training results saved in: {os.path.abspath(results_dir)}")
+    print(f"Global stats saved in: {os.path.abspath(os.path.join(checkpoints_dir, 'global_stats.json'))}")
     
     # Finish wandb run
     wandb.finish()
