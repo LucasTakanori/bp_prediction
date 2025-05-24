@@ -237,6 +237,8 @@ def visualize_reconstructions(model, test_data, device, frame_idx=0, num_images=
     plt.close(fig)
     return recon_batch  # Return reconstructions for further analysis if needed
 
+# Analyze latent space utilization
+
 
 def main():
     # Set up argument parser
@@ -252,7 +254,7 @@ def main():
                         help='Number of training epochs')
     parser.add_argument('--beta_min', type=float, default=0.01,
                         help='Minimum beta value for KL divergence weight')
-    parser.add_argument('--lr', type=float, default=1e-3,
+    parser.add_argument('--lr', type=float, default=1e-4,
                         help='Start learning rate')
     parser.add_argument('--beta_max', type=float, default=1.0,
                         help='Maximum beta value for KL divergence weight')
