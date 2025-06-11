@@ -1,0 +1,11 @@
+# Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+/lstm_outputs
+/lstm_outputs_mse
+/lstm_outputs_mse_3layers
+/train/__pycache__
+/train/enhanced_vae_bilstm_outputs
+/train/logs
+/train/wandb
+/train/optimized_output
+*__pycache__
+/vae_outputs

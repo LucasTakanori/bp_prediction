@@ -1,0 +1,54 @@
+data_config:
+  root_path: "/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data"
+  subject: "subject001"
+  session: "baseline"
+  cache_dir: null
+  preload_to_memory: false
+  use_mmap: true
+  force_reload: false
+
+model_config:
+  model_type: "vae"
+  latent_dim: 512
+  input_channels: 1
+  input_height: 32
+  input_width: 32
+  hidden_dims: [64, 128, 256, 512]
+  activation: "relu"
+  dropout_rate: 0.2
+  use_batch_norm: true
+
+training_config:
+  num_epochs: 100
+  learning_rate: 0.0001
+  batch_size: 32
+  optimizer: "adam"
+  adam_betas: [0.9, 0.999]
+  weight_decay: 0.00001
+  
+  # VAE specific
+  vae_beta: 0.4
+  
+  # Scheduler
+  use_scheduler: true
+  scheduler_type: "cosine"
+  scheduler_patience: 10
+  
+  # Mixed precision and optimization
+  use_mixed_precision: true
+  grad_clip_norm: 1.0
+  
+  # Early stopping
+  early_stopping_patience: 100
+  early_stopping_min_delta: 0.00001
+  
+  # Checkpointing
+  save_every_n_epochs: 5
+  
+  # Wandb logging
+  use_wandb: true
+  project_name: "vae-bp-prediction"
+  wandb_mode: "offline"
+  
+  # Output
+  output_dir: "/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/vae_outputs" 

@@ -1,0 +1,71 @@
+# Example configuration for BiLSTM training
+data_config:
+  data_root: "/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data"
+  subject: "S01"  # Subject identifier
+  session: "Session1"  # Session identifier
+  sequence_length: 3
+  pattern_offsets: [-7, 0, 3]
+  bp_normalization: [40.0, 200.0]
+  frame_normalization: "minmax"
+  return_metadata: true
+  force_reload: false
+
+model_config:
+  model_type: "bilstm"
+  # Feature extractor (CNN) parameters
+  input_channels: 1
+  input_height: 64
+  input_width: 64
+  feature_extractor_type: "cnn"
+  cnn_channels: [32, 64, 128]
+  cnn_kernel_sizes: [3, 3, 3]
+  cnn_dropout: 0.2
+  
+  # BiLSTM parameters
+  hidden_dim: 256
+  num_layers: 3
+  dropout_rate: 0.3
+  bidirectional: true
+  
+  # Attention parameters
+  use_attention: true
+  attention_dim: 128
+  num_attention_heads: 8
+  
+  # Output parameters
+  output_dim: 50  # Length of BP waveform
+  use_residual: true
+
+training_config:
+  # Training parameters
+  num_epochs: 50
+  learning_rate: 0.0001
+  batch_size: 16
+  optimizer: "adam"
+  adam_betas: [0.9, 0.999]
+  weight_decay: 1e-5
+  
+  # Scheduling
+  use_scheduler: true
+  scheduler_type: "reduce_on_plateau"  # cosine, reduce_on_plateau, step
+  scheduler_patience: 10
+  
+  # Mixed precision training
+  use_mixed_precision: true
+  grad_clip_norm: 1.0
+  
+  # Early stopping
+  early_stopping_patience: 20
+  early_stopping_min_delta: 1e-4
+  
+  # Output
+  output_dir: "experiments"
+  save_every_n_epochs: 5
+  
+  # Wandb logging
+  use_wandb: true
+  project_name: "bp_prediction_bilstm"
+  wandb_mode: "offline"
+  
+  # VAE specific (not used for BiLSTM)
+  vae_beta: 1.0 

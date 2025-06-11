@@ -10,140 +10,15 @@ import argparse
 from tqdm import tqdm
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import wandb
+import pickle
+import time
+from typing import Dict, List, Tuple, Optional
+from collections import defaultdict
 
 # Add the parent directory to the path to find utils
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 # Import your dataset utilities
 from utils.data_utils import PviDataset, PviBatchServer
-
-# Helper functions for proper systolic and diastolic extraction
-def extract_systolic_diastolic_proper(waveform, dim=None):
-    """
-    Extract systolic and diastolic values properly:
-    - Systolic: maximum value in the waveform
-    - Diastolic: minimum value that occurs after the systolic peak
-    
-    Args:
-        waveform: Tensor or numpy array of shape [..., signal_length]
-        dim: Dimension along which to extract values (default: last dimension)
-    
-    Returns:
-        systolic_values: Maximum values
-        diastolic_values: Minimum values after systolic peak
-        systolic_indices: Indices of systolic peaks
-        diastolic_indices: Indices of diastolic values
-    """
-    if isinstance(waveform, torch.Tensor):
-        is_torch = True
-        if dim is None:
-            dim = -1
-    else:
-        is_torch = False
-        waveform = np.array(waveform)
-        if dim is None:
-            dim = -1
-    
-    # Handle different input shapes
-    original_shape = waveform.shape
-    if len(original_shape) == 1:
-        # Single waveform
-        waveform = waveform.reshape(1, -1)
-        batch_size = 1
-    else:
-        # Batch of waveforms - flatten all but last dimension
-        if dim != -1:
-            # Move the signal dimension to the end
-            if is_torch:
-                waveform = waveform.transpose(dim, -1)
-            else:
-                waveform = np.moveaxis(waveform, dim, -1)
-        
-        # Flatten all dimensions except the last (signal) dimension
-        batch_size = np.prod(original_shape[:-1])
-        waveform = waveform.reshape(batch_size, -1)
-    
-    signal_length = waveform.shape[-1]
-    
-    if is_torch:
-        systolic_values = torch.zeros(batch_size, device=waveform.device, dtype=waveform.dtype)
-        diastolic_values = torch.zeros(batch_size, device=waveform.device, dtype=waveform.dtype)
-        systolic_indices = torch.zeros(batch_size, device=waveform.device, dtype=torch.long)
-        diastolic_indices = torch.zeros(batch_size, device=waveform.device, dtype=torch.long)
-    else:
-        systolic_values = np.zeros(batch_size, dtype=waveform.dtype)
-        diastolic_values = np.zeros(batch_size, dtype=waveform.dtype)
-        systolic_indices = np.zeros(batch_size, dtype=np.int64)
-        diastolic_indices = np.zeros(batch_size, dtype=np.int64)
-    
-    for i in range(batch_size):
-        signal = waveform[i]
-        
-        # Find systolic (maximum) value and its index
-        if is_torch:
-            sys_val, sys_idx = torch.max(signal, dim=0)
-        else:
-            sys_idx = np.argmax(signal)
-            sys_val = signal[sys_idx]
-        
-        # Find diastolic (minimum after systolic peak)
-        # Look for minimum in the second half of the signal or after systolic peak
-        search_start = max(int(sys_idx) + 1, signal_length // 2)
-        
-        if search_start < signal_length:
-            # Search after systolic peak
-            post_systolic_signal = signal[search_start:]
-            if is_torch:
-                dias_val, relative_dias_idx = torch.min(post_systolic_signal, dim=0)
-                dias_idx = search_start + relative_dias_idx
-            else:
-                relative_dias_idx = np.argmin(post_systolic_signal)
-                dias_val = post_systolic_signal[relative_dias_idx]
-                dias_idx = search_start + relative_dias_idx
-        else:
-            # Fallback: if systolic is at the very end, use overall minimum
-            if is_torch:
-                dias_val, dias_idx = torch.min(signal, dim=0)
-            else:
-                dias_idx = np.argmin(signal)
-                dias_val = signal[dias_idx]
-        
-        systolic_values[i] = sys_val
-        diastolic_values[i] = dias_val
-        systolic_indices[i] = sys_idx
-        diastolic_indices[i] = dias_idx
-    
-    # Reshape back to original batch shape if needed
-    if len(original_shape) == 1:
-        # Single waveform - return scalars
-        if is_torch:
-            return systolic_values[0], diastolic_values[0], systolic_indices[0], diastolic_indices[0]
-        else:
-            return systolic_values[0], diastolic_values[0], systolic_indices[0], diastolic_indices[0]
-    else:
-        # Batch - reshape to match input batch dimensions
-        target_shape = original_shape[:-1]  # Remove signal dimension
-        if is_torch:
-            systolic_values = systolic_values.reshape(target_shape)
-            diastolic_values = diastolic_values.reshape(target_shape)
-            systolic_indices = systolic_indices.reshape(target_shape)
-            diastolic_indices = diastolic_indices.reshape(target_shape)
-        else:
-            systolic_values = systolic_values.reshape(target_shape)
-            diastolic_values = diastolic_values.reshape(target_shape)
-            systolic_indices = systolic_indices.reshape(target_shape)
-            diastolic_indices = diastolic_indices.reshape(target_shape)
-        
-        return systolic_values, diastolic_values, systolic_indices, diastolic_indices
-
-
-def extract_systolic_diastolic_values_only(waveform, dim=None):
-    """
-    Convenience function that returns only the systolic and diastolic values
-    (without indices) for backward compatibility.
-    """
-    sys_vals, dias_vals, _, _ = extract_systolic_diastolic_proper(waveform, dim)
-    return sys_vals, dias_vals
-
 
 # Define the VAE model with improved capacity
 class VAE(nn.Module):
@@ -224,6 +99,105 @@ class VAE(nn.Module):
         return x_recon, mu, logvar
 
 
+# Optimized VAE processing with batching
+class BatchedVAEProcessor:
+    """Process VAE encoding in batches for better efficiency"""
+    
+    def __init__(self, vae_model, device, batch_size=64):
+        self.vae_model = vae_model
+        self.device = device
+        self.batch_size = batch_size
+        
+        # Set VAE to eval mode and disable gradients
+        self.vae_model.eval()
+        for param in self.vae_model.parameters():
+            param.requires_grad = False
+    
+    def encode_batch(self, frames_batch):
+        """Encode a batch of frames efficiently"""
+        with torch.no_grad():
+            # frames_batch: [batch_size, 1, 32, 32]
+            mu, _ = self.vae_model.encode(frames_batch)
+            return mu
+    
+    def encode_sequence_batch(self, sequence_batch):
+        """
+        Encode sequences in batches
+        sequence_batch: [batch_size, seq_len, 1, 32, 32]
+        Returns: [batch_size, seq_len, latent_dim]
+        """
+        batch_size, seq_len = sequence_batch.shape[:2]
+        
+        # Reshape to process all frames at once
+        # [batch_size * seq_len, 1, 32, 32]
+        frames_flat = sequence_batch.view(-1, *sequence_batch.shape[2:])
+        
+        # Process in smaller batches to avoid memory issues
+        encoded_frames = []
+        for i in range(0, frames_flat.shape[0], self.batch_size):
+            batch_frames = frames_flat[i:i + self.batch_size]
+            encoded_batch = self.encode_batch(batch_frames)
+            encoded_frames.append(encoded_batch)
+        
+        # Concatenate and reshape back
+        encoded_flat = torch.cat(encoded_frames, dim=0)
+        encoded_sequences = encoded_flat.view(batch_size, seq_len, -1)
+        
+        return encoded_sequences
+
+
+# Sequence caching system
+class SequenceCache:
+    """Cache for preprocessed sequences to avoid recomputation"""
+    
+    def __init__(self, cache_dir: str, pattern_offsets: List[int]):
+        self.cache_dir = os.path.join(cache_dir, 'sequences')
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.pattern_offsets = pattern_offsets
+        self.cache = {}
+        
+        # Generate cache key based on pattern
+        pattern_str = '_'.join(map(str, pattern_offsets))
+        self.cache_file = os.path.join(self.cache_dir, f'sequences_{pattern_str}.pkl')
+        
+        self.load_cache()
+    
+    def load_cache(self):
+        """Load existing cache if available"""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'rb') as f:
+                    self.cache = pickle.load(f)
+                print(f"Loaded sequence cache with {len(self.cache)} entries")
+            except Exception as e:
+                print(f"Failed to load cache: {e}")
+                self.cache = {}
+        else:
+            self.cache = {}
+    
+    def save_cache(self):
+        """Save cache to disk"""
+        try:
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(self.cache, f)
+            print(f"Saved sequence cache with {len(self.cache)} entries")
+        except Exception as e:
+            print(f"Failed to save cache: {e}")
+    
+    def get_cache_key(self, sample_idx: int, central_indices: List[int]) -> str:
+        """Generate cache key for a sample"""
+        return f"{sample_idx}_{hash(tuple(central_indices))}"
+    
+    def get(self, cache_key: str) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """Get cached sequences"""
+        return self.cache.get(cache_key)
+    
+    def put(self, cache_key: str, sequences: torch.Tensor, targets: torch.Tensor):
+        """Store sequences in cache"""
+        # Store on CPU to save GPU memory
+        self.cache[cache_key] = (sequences.cpu(), targets.cpu())
+
+
 # Attention mechanism for temporal sequences
 class TemporalAttention(nn.Module):
     def __init__(self, hidden_dim, attention_dim=128):
@@ -271,12 +245,20 @@ class TemporalAttention(nn.Module):
 # Enhanced Bidirectional LSTM model with Attention for blood pressure prediction
 class VAEBiLSTMWithAttention(nn.Module):
     def __init__(self, vae_model, input_dim=256, hidden_dim=256, num_layers=2, 
-                 output_dim=50, dropout=0.3, use_attention=True, attention_dim=128):
+                 output_dim=50, dropout=0.3, use_attention=True, attention_dim=128,
+                 vae_batch_size=64):
         super(VAEBiLSTMWithAttention, self).__init__()
         
         # Store the pretrained VAE
         self.vae = vae_model
         self.use_attention = use_attention
+        
+        # Create batched VAE processor for efficiency
+        self.vae_processor = BatchedVAEProcessor(
+            vae_model, 
+            next(vae_model.parameters()).device, 
+            batch_size=vae_batch_size
+        )
         
         # Freeze the VAE parameters
         for param in self.vae.parameters():
@@ -326,25 +308,11 @@ class VAEBiLSTMWithAttention(nn.Module):
         
     def forward(self, x_seq, return_attention=False):
         """
+        Optimized forward pass with batched VAE processing
         x_seq: sequence of images [batch_size, seq_len, 1, 32, 32]
         """
-        batch_size, seq_len = x_seq.shape[0], x_seq.shape[1]
-        
-        # Encode each frame to get its latent representation
-        latent_seq = []
-        for t in range(seq_len):
-            # Get current frame
-            x_t = x_seq[:, t]  # [batch_size, 1, 32, 32]
-            
-            # Encode the frame (without computing gradients for VAE)
-            with torch.no_grad():
-                mu_t, _ = self.vae.encode(x_t)
-            
-            # Store the latent representation (just the mean)
-            latent_seq.append(mu_t)
-        
-        # Stack latent representations along the sequence dimension
-        latent_seq = torch.stack(latent_seq, dim=1)  # [batch_size, seq_len, latent_dim]
+        # Encode entire sequence batch efficiently using the batched processor
+        latent_seq = self.vae_processor.encode_sequence_batch(x_seq)
         
         # Project input features
         projected_seq = self.input_projection(latent_seq)  # [batch_size, seq_len, hidden_dim]
@@ -395,67 +363,60 @@ class VAEBiLSTMWithAttention(nn.Module):
         return outputs
 
 
-# Extract and normalize a specific frame from each sample
-def extract_frame(batch_data, frame_idx=0):
-    """Extract a specific frame from the batch data and normalize it to [0, 1]"""
+# Optimized frame extraction with vectorized operations
+def extract_frame_vectorized(batch_data, frame_idx=0):
+    """Vectorized frame extraction for better performance"""
     if isinstance(batch_data, dict):
-        # If batch is a dictionary (like in your debug output)
         pvi_data = batch_data['pviHP']
     else:
-        # If batch is just the tensor
         pvi_data = batch_data
     
-    # Extract the specific frame from each sample
-    # Shape: [batch_size, 1, 32, 32]
+    # Extract frames: [batch_size, 1, 32, 32]
     frames = pvi_data[:, 0, :, :, frame_idx].unsqueeze(1)
     
-    # Replace NaN values with zeros
+    # Replace NaN with zeros efficiently
     frames = torch.nan_to_num(frames, nan=0.0)
     
-    # Normalize to [0, 1] range for each sample individually
-    # First find min and max per sample
+    # Vectorized normalization
     batch_size = frames.shape[0]
-    normalized_frames = torch.zeros_like(frames)
+    frames_flat = frames.view(batch_size, -1)
     
-    for i in range(batch_size):
-        sample = frames[i]
-        min_val = torch.min(sample)
-        max_val = torch.max(sample)
-        
-        # Handle case where min == max (constant value)
-        if min_val == max_val:
-            normalized_frames[i] = torch.zeros_like(sample)
-        else:
-            # Normalize to [0, 1]
-            normalized_frames[i] = (sample - min_val) / (max_val - min_val)
+    # Find min/max for each sample
+    min_vals = frames_flat.min(dim=1, keepdim=True)[0]
+    max_vals = frames_flat.max(dim=1, keepdim=True)[0]
+    
+    # Handle constant values
+    range_vals = max_vals - min_vals
+    range_vals[range_vals == 0] = 1.0
+    
+    # Normalize
+    normalized_flat = (frames_flat - min_vals) / range_vals
+    normalized_frames = normalized_flat.view_as(frames)
     
     return normalized_frames
 
 
-# Prepare 10-frame sequence data (k-7 to k+2)
-def prepare_sequence_data(batch_data, central_indices=None, pattern_offsets=None):
+# Backwards compatibility
+def extract_frame(batch_data, frame_idx=0):
+    """Extract a specific frame from the batch data and normalize it to [0, 1]"""
+    return extract_frame_vectorized(batch_data, frame_idx)
+
+
+# Optimized sequence preparation with caching
+def prepare_sequence_data_optimized(batch_data, central_indices=None, pattern_offsets=None,
+                                   cache: Optional[SequenceCache] = None, 
+                                   batch_idx: Optional[int] = None):
     """
-    Prepare data with 10-frame sequence pattern (k-7 to k+2) and corresponding BP values
-    
-    Args:
-        batch_data: Dictionary with 'pviHP' and 'bp' keys
-        central_indices: List of indices to use as the central frame k
-                        If None, use all valid indices
-        pattern_offsets: List of offsets relative to central frame k
-                        Default: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2] for 10 frames
-    
-    Returns:
-        frame_sequences: Tensor of shape [batch_size, len(pattern_offsets), 1, 32, 32]
-        bp_targets: Tensor of shape [batch_size, 50] (BP signal)
+    Optimized sequence preparation with caching and vectorization
     """
     if pattern_offsets is None:
-        pattern_offsets = [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]  # 10 frames
+        pattern_offsets = [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]
     
     if not isinstance(batch_data, dict):
         raise ValueError("Expected batch_data to be a dictionary")
     
-    pvi_data = batch_data['pviHP']  # [batch_size, 1, 32, 32, 500]
-    bp_data = batch_data['bp']      # [batch_size, 50]
+    pvi_data = batch_data['pviHP']
+    bp_data = batch_data['bp']
     
     batch_size = pvi_data.shape[0]
     total_frames = pvi_data.shape[-1]
@@ -463,41 +424,60 @@ def prepare_sequence_data(batch_data, central_indices=None, pattern_offsets=None
     # Determine valid central indices
     min_offset = min(pattern_offsets)
     max_offset = max(pattern_offsets)
-    valid_indices_start = max(0, -min_offset)  # Ensure we don't go below 0
-    valid_indices_end = min(total_frames, total_frames - max_offset)  # Ensure we don't exceed total_frames
+    valid_indices_start = max(0, -min_offset)
+    valid_indices_end = min(total_frames, total_frames - max_offset)
     
-    # If central_indices not provided, use all valid indices
     if central_indices is None:
         central_indices = list(range(valid_indices_start, valid_indices_end))
     else:
-        # Filter central_indices to keep only valid ones
         central_indices = [k for k in central_indices if valid_indices_start <= k < valid_indices_end]
     
-    # Create sequences and targets
-    frame_sequences = []
-    bp_targets = []
+    # Try to load from cache if available
+    if cache is not None and batch_idx is not None:
+        cache_key = cache.get_cache_key(batch_idx, central_indices)
+        cached_result = cache.get(cache_key)
+        if cached_result is not None:
+            sequences, targets = cached_result
+            return sequences.to(pvi_data.device), targets.to(bp_data.device)
+    
+    # Process sequences in batch
+    all_sequences = []
+    all_targets = []
     
     for b in range(batch_size):
         for k in central_indices:
-            # Extract and normalize frames based on pattern
-            seq = []
+            # Extract sequence frames efficiently
+            sequence_frames = []
+            
             for offset in pattern_offsets:
                 frame_idx = k + offset
-                frame = extract_frame(batch_data, frame_idx)[b:b+1]  # Keep batch dimension
-                seq.append(frame)
+                # Create a mini-batch for this frame
+                mini_batch = {'pviHP': pvi_data[b:b+1]}
+                frame = extract_frame_vectorized(mini_batch, frame_idx)[0]
+                sequence_frames.append(frame)
             
-            # Stack frames into a sequence
-            seq = torch.cat(seq, dim=0)  # [len(pattern_offsets), 1, 32, 32]
-            frame_sequences.append(seq)
-            
-            # Add corresponding BP target
-            bp_targets.append(bp_data[b])
+            # Stack frames
+            sequence = torch.stack(sequence_frames, dim=0)
+            all_sequences.append(sequence)
+            all_targets.append(bp_data[b])
     
-    # Stack all sequences and targets
-    frame_sequences = torch.stack(frame_sequences)  # [num_sequences, len(pattern_offsets), 1, 32, 32]
-    bp_targets = torch.stack(bp_targets)            # [num_sequences, 50]
+    # Stack all sequences and targets efficiently
+    frame_sequences = torch.stack(all_sequences)
+    bp_targets = torch.stack(all_targets)
+    
+    # Cache the result if cache is available
+    if cache is not None and batch_idx is not None:
+        cache.put(cache_key, frame_sequences, bp_targets)
     
     return frame_sequences, bp_targets
+
+
+# Backwards compatibility
+def prepare_sequence_data(batch_data, central_indices=None, pattern_offsets=None):
+    """
+    Prepare data with 10-frame sequence pattern (k-7 to k+2) and corresponding BP values
+    """
+    return prepare_sequence_data_optimized(batch_data, central_indices, pattern_offsets)
 
 
 # Normalize blood pressure data
@@ -558,10 +538,9 @@ class BPLossFunction:
         
         y_true = targets
         
-        # Calculate true systolic and diastolic values using proper extraction
-        sys_true, dias_true = extract_systolic_diastolic_values_only(y_true, dim=1)
-        sys_true = sys_true.unsqueeze(1)  # [batch_size, 1]
-        dias_true = dias_true.unsqueeze(1)  # [batch_size, 1]
+        # Calculate true systolic and diastolic values
+        sys_true = torch.max(y_true, dim=1)[0].unsqueeze(1)  # [batch_size, 1]
+        dias_true = torch.min(y_true, dim=1)[0].unsqueeze(1)  # [batch_size, 1]
         
         if self.loss_type == 'mse':
             # Standard MSE loss on waveform
@@ -573,8 +552,7 @@ class BPLossFunction:
                 return F.mse_loss(sys_pred, sys_true)
             else:
                 # Extract systolic from waveform prediction
-                sys_pred_extracted, _ = extract_systolic_diastolic_values_only(y_pred, dim=1)
-                sys_pred_extracted = sys_pred_extracted.unsqueeze(1)
+                sys_pred_extracted = torch.max(y_pred, dim=1)[0].unsqueeze(1)
                 return F.mse_loss(sys_pred_extracted, sys_true)
         
         elif self.loss_type == 'diastolic_distance':
@@ -583,8 +561,7 @@ class BPLossFunction:
                 return F.mse_loss(dias_pred, dias_true)
             else:
                 # Extract diastolic from waveform prediction
-                _, dias_pred_extracted = extract_systolic_diastolic_values_only(y_pred, dim=1)
-                dias_pred_extracted = dias_pred_extracted.unsqueeze(1)
+                dias_pred_extracted = torch.min(y_pred, dim=1)[0].unsqueeze(1)
                 return F.mse_loss(dias_pred_extracted, dias_true)
         
         elif self.loss_type == 'composite':
@@ -596,16 +573,14 @@ class BPLossFunction:
             if sys_pred is not None:
                 sys_loss = F.mse_loss(sys_pred, sys_true)
             else:
-                sys_pred_extracted, _ = extract_systolic_diastolic_values_only(y_pred, dim=1)
-                sys_pred_extracted = sys_pred_extracted.unsqueeze(1)
+                sys_pred_extracted = torch.max(y_pred, dim=1)[0].unsqueeze(1)
                 sys_loss = F.mse_loss(sys_pred_extracted, sys_true)
             
             # Diastolic loss
             if dias_pred is not None:
                 dias_loss = F.mse_loss(dias_pred, dias_true)
             else:
-                _, dias_pred_extracted = extract_systolic_diastolic_values_only(y_pred, dim=1)
-                dias_pred_extracted = dias_pred_extracted.unsqueeze(1)
+                dias_pred_extracted = torch.min(y_pred, dim=1)[0].unsqueeze(1)
                 dias_loss = F.mse_loss(dias_pred_extracted, dias_true)
             
             # Combined loss
@@ -616,14 +591,29 @@ class BPLossFunction:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
 
 
-# Train the enhanced BiLSTM model
+# Optimized training function
 def train_enhanced_bilstm(model, train_loader, val_batches, device, num_epochs=20, 
                          pattern_offsets=None, bp_norm_params=(40, 200), 
-                         loss_type='composite', output_dir=None):
-    """Train the enhanced BiLSTM model for blood pressure prediction"""
+                         loss_type='composite', output_dir=None, 
+                         enable_caching=True, cache_dir=None):
+    """Optimized training with caching and efficient data processing"""
     
     if pattern_offsets is None:
-        pattern_offsets = [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]  # 10 frames
+        pattern_offsets = [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]
+    
+    # Set up caching
+    sequence_cache = None
+    if enable_caching:
+        if cache_dir is None:
+            cache_dir = output_dir
+        sequence_cache = SequenceCache(cache_dir, pattern_offsets)
+    
+    # Apply PyTorch optimizations
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        torch.cuda.set_per_process_memory_fraction(0.95)
+        print("Applied CUDA optimizations")
     
     # Create directories for saving results
     checkpoints_dir = os.path.join(output_dir, 'checkpoints')
@@ -645,6 +635,14 @@ def train_enhanced_bilstm(model, train_loader, val_batches, device, num_epochs=2
         eta_min=1e-6
     )
     
+    # Compile model if available (PyTorch 2.0+)
+    if hasattr(torch, 'compile'):
+        try:
+            model = torch.compile(model)
+            print("Model compiled for faster execution")
+        except:
+            print("Model compilation not available or failed")
+    
     # Track best model
     best_val_loss = float('inf')
     best_epoch = 0
@@ -663,18 +661,25 @@ def train_enhanced_bilstm(model, train_loader, val_batches, device, num_epochs=2
         current_lr = optimizer.param_groups[0]['lr']
         learning_rates.append(current_lr)
         
-        # Training loop
+        # Training loop with optimizations
+        train_start_time = time.time()
+        
         for batch_idx, batch_data in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}")):
             try:
-                # Prepare sequences with 10-frame pattern
-                sequences, targets = prepare_sequence_data(batch_data, pattern_offsets=pattern_offsets)
+                # Use optimized sequence preparation with caching
+                sequences, targets = prepare_sequence_data_optimized(
+                    batch_data, 
+                    pattern_offsets=pattern_offsets,
+                    cache=sequence_cache,
+                    batch_idx=batch_idx
+                )
                 
                 # Normalize targets
                 targets_norm, _ = normalize_bp(targets, bp_min, bp_max)
                 
-                # Move to device
-                sequences = sequences.to(device)
-                targets_norm = targets_norm.to(device)
+                # Move to device with non_blocking for efficiency
+                sequences = sequences.to(device, non_blocking=True)
+                targets_norm = targets_norm.to(device, non_blocking=True)
                 
                 # Zero gradients
                 optimizer.zero_grad()
@@ -716,32 +721,44 @@ def train_enhanced_bilstm(model, train_loader, val_batches, device, num_epochs=2
                         "batch": epoch * len(train_loader) + batch_idx
                     })
                 
+                # Clear cache periodically to avoid memory buildup
+                if batch_idx % 50 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
             except Exception as e:
                 print(f"Error processing batch {batch_idx}: {e}")
                 continue
+        
+        train_time = time.time() - train_start_time
         
         # Calculate average loss
         if sample_count > 0:
             train_loss /= sample_count
         train_losses.append(train_loss)
         
-        # Validation
+        # Validation with optimizations
         model.eval()
         val_loss = 0
         val_sample_count = 0
         
+        val_start_time = time.time()
         with torch.no_grad():
             for batch_idx, batch_data in enumerate(tqdm(val_batches, desc="Validation")):
                 try:
-                    # Prepare sequences with 10-frame pattern
-                    sequences, targets = prepare_sequence_data(batch_data, pattern_offsets=pattern_offsets)
+                    # Use optimized sequence preparation with caching
+                    sequences, targets = prepare_sequence_data_optimized(
+                        batch_data, 
+                        pattern_offsets=pattern_offsets,
+                        cache=sequence_cache,
+                        batch_idx=f"val_{batch_idx}"
+                    )
                     
                     # Normalize targets
                     targets_norm, _ = normalize_bp(targets, bp_min, bp_max)
                     
-                    # Move to device
-                    sequences = sequences.to(device)
-                    targets_norm = targets_norm.to(device)
+                    # Move to device with non_blocking
+                    sequences = sequences.to(device, non_blocking=True)
+                    targets_norm = targets_norm.to(device, non_blocking=True)
                     
                     # Forward pass
                     outputs = model(sequences)
@@ -768,6 +785,8 @@ def train_enhanced_bilstm(model, train_loader, val_batches, device, num_epochs=2
                     print(f"Error processing validation batch {batch_idx}: {e}")
                     continue
         
+        val_time = time.time() - val_start_time
+        
         # Calculate average validation loss
         if val_sample_count > 0:
             val_loss /= val_sample_count
@@ -776,15 +795,18 @@ def train_enhanced_bilstm(model, train_loader, val_batches, device, num_epochs=2
         # Update scheduler
         scheduler.step()
         
-        # Print progress
-        print(f"Epoch {epoch}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, LR = {current_lr:.6f}")
+        # Print progress with timing information
+        print(f"Epoch {epoch}: Train Loss = {train_loss:.6f} ({train_time:.1f}s), "
+              f"Val Loss = {val_loss:.6f} ({val_time:.1f}s), LR = {current_lr:.6f}")
         
         # Log epoch-level metrics to wandb
         wandb.log({
             "epoch": epoch,
             "train_loss": train_loss,
             "val_loss": val_loss,
-            "learning_rate": current_lr
+            "learning_rate": current_lr,
+            "train_time": train_time,
+            "val_time": val_time
         })
         
         # Check if this is the best model
@@ -820,6 +842,10 @@ def train_enhanced_bilstm(model, train_loader, val_batches, device, num_epochs=2
                 'pattern_offsets': pattern_offsets,
                 'loss_type': loss_type
             }, os.path.join(checkpoints_dir, f'enhanced_bilstm_epoch_{epoch}.pt'))
+    
+    # Save cache at the end
+    if sequence_cache is not None:
+        sequence_cache.save_cache()
     
     # Plot training curves
     plt.figure(figsize=(15, 5))
@@ -879,15 +905,18 @@ def evaluate_enhanced_bilstm(model, test_loader, device, pattern_offsets=None,
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(tqdm(test_loader, desc="Testing")):
             try:
-                # Prepare sequences with 10-frame pattern
-                sequences, targets = prepare_sequence_data(batch_data, pattern_offsets=pattern_offsets)
+                # Use optimized sequence preparation
+                sequences, targets = prepare_sequence_data_optimized(
+                    batch_data, 
+                    pattern_offsets=pattern_offsets
+                )
                 
                 # Normalize targets
                 targets_norm, _ = normalize_bp(targets, bp_min, bp_max)
                 
                 # Move to device
-                sequences = sequences.to(device)
-                targets_norm = targets_norm.to(device)
+                sequences = sequences.to(device, non_blocking=True)
+                targets_norm = targets_norm.to(device, non_blocking=True)
                 
                 # Forward pass with attention visualization
                 outputs = model(sequences, return_attention=visualize_attention)
@@ -995,28 +1024,27 @@ def plot_enhanced_predictions(predictions, targets, output_dir, num_examples=5):
         mse_sample = np.mean((pred - target) ** 2)
         mae_sample = np.mean(np.abs(pred - target))
         
-        # Extract systolic and diastolic using proper method
-        sys_pred, dias_pred, sys_idx_pred, dias_idx_pred = extract_systolic_diastolic_proper(pred)
-        sys_true, dias_true, sys_idx_true, dias_idx_true = extract_systolic_diastolic_proper(target)
+        # Extract systolic and diastolic
+        sys_pred = np.max(pred)
+        sys_true = np.max(target)
+        dias_pred = np.min(pred)
+        dias_true = np.min(target)
         
         # Plot
         time_points = np.arange(len(target))
         axes[i].plot(time_points, target, label='Target BP', color='blue', linewidth=2)
         axes[i].plot(time_points, pred, label='Predicted BP', color='red', linestyle='--', linewidth=2)
         
-        # Mark systolic and diastolic points with proper indices
-        axes[i].scatter(sys_idx_true, sys_true, color='blue', s=100, marker='^', 
-                       label=f'Sys True: {sys_true:.1f} mmHg @ t={sys_idx_true}')
-        axes[i].scatter(dias_idx_true, dias_true, color='blue', s=100, marker='v', 
-                       label=f'Dias True: {dias_true:.1f} mmHg @ t={dias_idx_true}')
-        axes[i].scatter(sys_idx_pred, sys_pred, color='red', s=100, marker='^', 
-                       label=f'Sys Pred: {sys_pred:.1f} mmHg @ t={sys_idx_pred}')
-        axes[i].scatter(dias_idx_pred, dias_pred, color='red', s=100, marker='v', 
-                       label=f'Dias Pred: {dias_pred:.1f} mmHg @ t={dias_idx_pred}')
+        # Mark systolic and diastolic points
+        sys_idx_true = np.argmax(target)
+        dias_idx_true = np.argmin(target)
+        sys_idx_pred = np.argmax(pred)
+        dias_idx_pred = np.argmin(pred)
         
-        # Add vertical line to show systolic peak timing
-        axes[i].axvline(x=sys_idx_true, color='blue', alpha=0.3, linestyle=':')
-        axes[i].axvline(x=sys_idx_pred, color='red', alpha=0.3, linestyle=':')
+        axes[i].scatter(sys_idx_true, sys_true, color='blue', s=100, marker='^', label=f'Sys True: {sys_true:.1f}')
+        axes[i].scatter(dias_idx_true, dias_true, color='blue', s=100, marker='v', label=f'Dias True: {dias_true:.1f}')
+        axes[i].scatter(sys_idx_pred, sys_pred, color='red', s=100, marker='^', label=f'Sys Pred: {sys_pred:.1f}')
+        axes[i].scatter(dias_idx_pred, dias_pred, color='red', s=100, marker='v', label=f'Dias Pred: {dias_pred:.1f}')
         
         axes[i].set_title(f'Example {i+1} - MSE: {mse_sample:.2f}, MAE: {mae_sample:.2f}')
         axes[i].set_xlabel('Time Points')
@@ -1038,9 +1066,11 @@ def calculate_bp_metrics_enhanced(predictions, targets, output_dir):
     
     results_dir = os.path.join(output_dir, 'results')
     
-    # For each waveform, get systolic (max) and diastolic (min after systolic) using proper method
-    sys_targets, dias_targets = extract_systolic_diastolic_values_only(targets, dim=1)
-    sys_preds, dias_preds = extract_systolic_diastolic_values_only(predictions, dim=1)
+    # For each waveform, get systolic (max) and diastolic (min)
+    sys_targets = np.max(targets, axis=1)
+    dias_targets = np.min(targets, axis=1)
+    sys_preds = np.max(predictions, axis=1)
+    dias_preds = np.min(predictions, axis=1)
     
     # Calculate MAE for systolic and diastolic
     sys_mae = np.mean(np.abs(sys_targets - sys_preds))
@@ -1092,7 +1122,7 @@ def calculate_bp_metrics_enhanced(predictions, targets, output_dir):
                       label=f'-1.96σ: {np.mean(diff_dias) - 1.96*np.std(diff_dias):.2f}')
     axes[0, 1].set_xlabel('Mean Diastolic BP (mmHg)')
     axes[0, 1].set_ylabel('Difference (Target - Predicted)')
-    axes[0, 1].set_title('Bland-Altman Plot for Diastolic BP (After Systolic Peak)')
+    axes[0, 1].set_title('Bland-Altman Plot for Diastolic BP')
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
     
@@ -1120,7 +1150,7 @@ def calculate_bp_metrics_enhanced(predictions, targets, output_dir):
     dias_r2 = r2_score(dias_targets, dias_preds)
     axes[1, 1].set_xlabel('True Diastolic BP (mmHg)')
     axes[1, 1].set_ylabel('Predicted Diastolic BP (mmHg)')
-    axes[1, 1].set_title(f'Diastolic BP Prediction (R² = {dias_r2:.3f}) - After Systolic Peak')
+    axes[1, 1].set_title(f'Diastolic BP Prediction (R² = {dias_r2:.3f})')
     axes[1, 1].legend()
     axes[1, 1].grid(True, alpha=0.3)
     
@@ -1229,6 +1259,8 @@ def main():
                         help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size for training')
+    parser.add_argument('--vae_batch_size', type=int, default=64,
+                        help='Batch size for VAE processing')
     parser.add_argument('--use_attention', action='store_true', default=True,
                         help='Use attention mechanism')
     parser.add_argument('--attention_dim', type=int, default=128,
@@ -1238,6 +1270,8 @@ def main():
                         help='Type of loss function to use')
     parser.add_argument('--visualize_attention', action='store_true', default=False,
                         help='Visualize attention patterns during evaluation')
+    parser.add_argument('--enable_caching', action='store_true', default=True,
+                        help='Enable sequence caching for faster training')
     parser.add_argument('--wandb_project', type=str, default='enhanced-vae-bilstm-bp',
                         help='Weights & Biases project name')
     parser.add_argument('--wandb_name', type=str, default=None,
@@ -1261,6 +1295,7 @@ def main():
             "lstm_layers": args.lstm_layers,
             "num_epochs": args.num_epochs,
             "batch_size": args.batch_size,
+            "vae_batch_size": args.vae_batch_size,
             "use_attention": args.use_attention,
             "attention_dim": args.attention_dim,
             "pattern_offsets": pattern_offsets,
@@ -1270,7 +1305,8 @@ def main():
             "dropout": 0.3,
             "loss_type": args.loss_type,
             "data_path": args.data_path,
-            "output_dir": args.output_dir
+            "output_dir": args.output_dir,
+            "enable_caching": args.enable_caching
         },
         mode=args.wandb_mode
     )
@@ -1298,9 +1334,20 @@ def main():
     else:
         vae_checkpoint_path = args.vae_checkpoint
     
-    # Set up device
+    # Set up device and apply optimizations
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
+    # Apply PyTorch optimizations
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        torch.cuda.set_per_process_memory_fraction(0.95)
+        torch.cuda.empty_cache()
+        print("Applied CUDA optimizations")
+    
+    torch.set_num_threads(min(os.cpu_count(), 8))
+    
     wandb.config.update({"device": str(device)})
     
     # Set hyperparameters
@@ -1315,10 +1362,8 @@ def main():
     print(f"Using 10-frame pattern with offsets: {pattern_offsets}")
     print(f"Loss function type: {args.loss_type}")
     print(f"Using attention: {args.use_attention}")
-    print(f"Blood pressure calculation method:")
-    print(f"  - Systolic: Maximum value in BP waveform")
-    print(f"  - Diastolic: Minimum value occurring AFTER systolic peak")
-    print(f"    (ensures physiologically correct diastolic measurement)")
+    print(f"Caching enabled: {args.enable_caching}")
+    print(f"VAE batch size: {args.vae_batch_size}")
     
     # Load dataset
     print(f"Loading dataset from: {args.data_path}")
@@ -1367,7 +1412,8 @@ def main():
         output_dim=50,  # BP signal length
         dropout=0.3,
         use_attention=args.use_attention,
-        attention_dim=args.attention_dim
+        attention_dim=args.attention_dim,
+        vae_batch_size=args.vae_batch_size
     ).to(device)
     
     print(f"Enhanced BiLSTM model created with {sum(p.numel() for p in enhanced_bilstm_model.parameters() if p.requires_grad):,} trainable parameters")
@@ -1383,7 +1429,9 @@ def main():
         pattern_offsets=pattern_offsets,
         bp_norm_params=bp_norm_params,
         loss_type=args.loss_type,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        enable_caching=args.enable_caching,
+        cache_dir=args.output_dir
     )
     
     # Create a simple test DataLoader from the test batches list
@@ -1457,10 +1505,8 @@ def main():
         f.write(f"Latent Dimension: {latent_dim}\n")
         f.write(f"LSTM Hidden Dimension: {lstm_hidden_dim}\n")
         f.write(f"LSTM Layers: {lstm_num_layers}\n")
-        f.write(f"\nBlood Pressure Calculation Method:\n")
-        f.write(f"- Systolic: Maximum value in BP waveform\n")
-        f.write(f"- Diastolic: Minimum value occurring AFTER systolic peak\n")
-        f.write(f"  (ensures physiologically correct diastolic measurement)\n")
+        f.write(f"VAE Batch Size: {args.vae_batch_size}\n")
+        f.write(f"Caching Enabled: {args.enable_caching}\n")
         
         if mse is not None:
             f.write(f"\nPerformance Metrics:\n")
@@ -1469,7 +1515,6 @@ def main():
             f.write(f"R² (denormalized): {r2:.6f}\n")
             f.write(f"Systolic MAE: {sys_mae:.2f} mmHg (mean error: {sys_error:.2f})\n")
             f.write(f"Diastolic MAE: {dias_mae:.2f} mmHg (mean error: {dias_error:.2f})\n")
-            f.write(f"  ^ Diastolic values calculated after systolic peak\n")
         else:
             f.write("No valid predictions were made during evaluation\n")
     

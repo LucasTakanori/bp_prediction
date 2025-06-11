@@ -1,0 +1,58 @@
+data_config:
+  root_path: "/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data"
+  subject: "subject001"
+  session: "baseline"
+  cache_dir: null
+  preload_to_memory: false
+  use_mmap: true
+  force_reload: false
+
+model_config:
+  model_type: "bilstm"
+  latent_dim: 512  # Should match VAE latent_dim
+  hidden_dim: 256
+  num_layers: 3
+  output_dim: 50
+  dropout_rate: 0.3
+  bidirectional: true
+  
+  # Attention mechanism
+  use_attention: true
+  attention_dim: 128
+  num_attention_heads: 8
+  use_residual: true
+  
+  # VAE checkpoint path (update this after VAE training)
+  vae_checkpoint_path: "/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/vae_outputs/vae_20250607_161543/checkpoints/best_model.pth"
+
+training_config:
+  num_epochs: 20
+  learning_rate: 0.0001
+  batch_size: 32
+  optimizer: "adam"
+  adam_betas: [0.9, 0.999]
+  weight_decay: 0.00001
+  
+  # Scheduler
+  use_scheduler: true
+  scheduler_type: "reduce_on_plateau"
+  scheduler_patience: 5
+  
+  # Mixed precision and optimization
+  use_mixed_precision: true
+  grad_clip_norm: 1.0
+  
+  # Early stopping
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.0001
+  
+  # Checkpointing
+  save_every_n_epochs: 5
+  
+  # Wandb logging
+  use_wandb: true
+  project_name: "bilstm-bp-prediction"
+  wandb_mode: "offline"
+  
+  # Output
+  output_dir: "/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/lstm_outputs" 

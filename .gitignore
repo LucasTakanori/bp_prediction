@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+train/optimized_ouptut/cache/
 data/
 model/
 checkpoints/
@@ -10,8 +11,10 @@ logs/
 results/
 models/
 vae_output/
+vae_outputs/
 vae_output_1/
 wandb/
+lstm_outputs/
 
 # C extensions
 *.so

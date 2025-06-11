@@ -1,0 +1,66 @@
+# Example configuration for VAE training
+data_config:
+  data_root: "/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data"
+  subject: "S01"  # Subject identifier
+  session: "Session1"  # Session identifier
+  sequence_length: 3
+  pattern_offsets: [-7, 0, 3]
+  bp_normalization: [40.0, 200.0]
+  frame_normalization: "minmax"
+  return_metadata: false
+  force_reload: false
+
+model_config:
+  model_type: "vae"
+  # VAE specific parameters
+  input_channels: 1
+  input_height: 64
+  input_width: 64
+  latent_dim: 128
+  hidden_dims: [32, 64, 128, 256]
+  activation: "relu"
+  dropout_rate: 0.2
+  use_batch_norm: true
+
+training_config:
+  # Training parameters
+  num_epochs: 100
+  learning_rate: 0.001
+  batch_size: 32
+  optimizer: "adam"
+  adam_betas: [0.9, 0.999]
+  weight_decay: 1e-5
+  
+  # VAE specific
+  vae_beta: 1.0  # Beta parameter for VAE loss
+  
+  # Scheduling
+  use_scheduler: true
+  scheduler_type: "cosine"  # cosine, reduce_on_plateau, step
+  scheduler_patience: 10
+  scheduler_step_size: 30
+  
+  # Mixed precision training
+  use_mixed_precision: true
+  grad_clip_norm: 1.0
+  
+  # Early stopping
+  early_stopping_patience: 15
+  early_stopping_min_delta: 1e-4
+  
+  # Logging and checkpointing
+  output_dir: "experiments"
+  checkpoint_dir: null  # Will be set automatically
+  log_dir: null  # Will be set automatically
+  save_every_n_epochs: 10
+  
+  # Weights and Biases
+  use_wandb: true
+  project_name: "bp_prediction_vae"
+  wandb_mode: "offline"
+  
+  # Loss weights (not used for VAE)
+  systolic_weight: 1.0
+  diastolic_weight: 1.0
+  shape_weight: 0.1
+  temporal_weight: 0.1 

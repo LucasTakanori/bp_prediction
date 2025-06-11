@@ -105,7 +105,7 @@ def print_batch_structure(batch):
 
 if __name__ == "__main__":
     # Get the path to your H5 file - adjust this to your file location
-    data_path = os.path.expanduser("~/phd/data/subject001_baseline_masked.h5")
+    data_path = os.path.expanduser("/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data/subject001_baseline_masked.h5")
     
     # Inspect the dataset
     inspect_dataset_structure(data_path)
