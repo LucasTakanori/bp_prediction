@@ -24,7 +24,7 @@ model_config:
   model_type: "vae"
   
   # VAE architecture
-  latent_dim: 128
+  latent_dim: 64
   input_channels: 1
   input_height: 32
   input_width: 32
