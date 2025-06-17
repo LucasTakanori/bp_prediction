@@ -1,0 +1,100 @@
+# BiLSTM Baseline Configuration
+# Uses environment variables for paths and standardized structure
+
+environment:
+  data_root: "${BP_DATA_ROOT:/home/lucas_takanori/phd/data}"
+  experiments_root: "${BP_EXPERIMENTS_ROOT:./experiments}"
+  cache_dir: "${BP_CACHE_DIR:./cache}"
+
+data_config:
+  # Path configuration
+  root_path: "${BP_DATA_ROOT:/home/lucas_takanori/phd/data}"
+  subject: "subject001"
+  session: "baseline"
+  cache_dir: "${BP_CACHE_DIR:./cache}"
+  
+  # Data loading options
+  preload_to_memory: false
+  use_mmap: true
+  force_reload: false
+  return_metadata: true
+  
+  # Sequence parameters
+  sequence_length: 3
+  pattern_offsets: [-7, 0, 3]
+  
+  # Normalization parameters
+  bp_normalization: [40.0, 200.0]
+  frame_normalization: "minmax"
+
+model_config:
+  model_type: "bilstm"
+  
+  # BiLSTM architecture
+  input_dim: 256  # Should match VAE latent_dim
+  hidden_dim: 256
+  num_layers: 3
+  output_dim: 50
+  bidirectional: true
+  
+  # Attention mechanism
+  use_attention: true
+  attention_dim: 128
+  num_attention_heads: 8
+  
+  # Regularization
+  dropout_rate: 0.3
+  use_residual: true
+  
+  # VAE checkpoint (required for BiLSTM training)
+  vae_checkpoint_path: "${BP_EXPERIMENTS_ROOT:./experiments}/vae_baseline/checkpoints/vae_best.pt"
+
+training_config:
+  # Basic training parameters
+  num_epochs: 25
+  batch_size: 8
+  learning_rate: 1e-4
+  optimizer: "adam"
+  weight_decay: 1e-5
+  
+  # Scheduler
+  use_scheduler: true
+  scheduler_type: "cosine"
+  scheduler_patience: 10
+  
+  # Mixed precision and optimization
+  use_mixed_precision: false
+  grad_clip_norm: 1.0
+  
+  # Early stopping
+  early_stopping_patience: 15
+  early_stopping_min_delta: 1e-4
+  
+  # Checkpointing
+  save_every_n_epochs: 5
+  
+  # Output
+  output_dir: "${BP_EXPERIMENTS_ROOT:./experiments}"
+
+loss_config:
+  loss_type: "composite"  # mse, systolic_distance, diastolic_distance, composite
+  
+  # Composite loss weights
+  systolic_weight: 1.0
+  diastolic_weight: 1.0
+  shape_weight: 0.5
+  temporal_weight: 0.3
+  
+  # BP normalization parameters
+  bp_min: 40.0
+  bp_max: 200.0
+
+logging_config:
+  level: "INFO"
+  use_wandb: true
+  wandb_project: "${WANDB_PROJECT:bp-prediction}"
+  wandb_mode: "offline"
+  
+# Experiment metadata
+experiment_name: "bilstm_baseline"
+description: "BiLSTM baseline experiment with standardized configuration" 

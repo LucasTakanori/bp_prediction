@@ -97,40 +97,24 @@ class VAE(nn.Module):
 # Extract and normalize a specific frame from each sample
 def extract_frame(batch_data, frame_idx=0):
     """Extract a specific frame from the batch data and normalize it to [0, 1]"""
-    if isinstance(batch_data, dict):
-        # If batch is a dictionary (like in your debug output)
+    if isinstance(batch_data, dict) and 'input' in batch_data:
+        # PviBatchServer returns data with 'input' key
+        # Input shape: [batch_size, 32, 32, 500]
+        pvi_data = batch_data['input']
+        # Extract frame at specific time index
+        frames = pvi_data[:, :, :, frame_idx].unsqueeze(1)  # Add channel dimension: [batch, 1, 32, 32]
+    elif isinstance(batch_data, dict) and 'pviHP' in batch_data:
+        # Direct dataset access (for compatibility)
         pvi_data = batch_data['pviHP']
+        frames = pvi_data[:, 0, :, :, frame_idx].unsqueeze(1)
     else:
         # If batch is just the tensor
         pvi_data = batch_data
-    
-    # Extract the specific frame from each sample
-    # Shape: [batch_size, 1, 32, 32]
-    frames = pvi_data[:, 0, :, :, frame_idx].unsqueeze(1)
+        frames = pvi_data[:, 0, :, :, frame_idx].unsqueeze(1)
     
     # Replace NaN values with zeros
     frames = torch.nan_to_num(frames, nan=0.0)
     
-
-    # Normalize to [0, 1] range for each sample individually
-    # First find min and max per sample
-    # batch_size = frames.shape[0]
-    # normalized_frames = torch.zeros_like(frames)
-    
-    # for i in range(batch_size):
-    #     sample = frames[i]
-    #     min_val = torch.min(sample)
-    #     max_val = torch.max(sample)
-        
-    #     # Handle case where min == max (constant value)
-    #     if min_val == max_val:
-    #         normalized_frames[i] = torch.zeros_like(sample)
-    #     else:
-    #         # Normalize to [0, 1]
-    #         normalized_frames[i] = (sample - min_val) / (max_val - min_val)
-    
-    # return normalized_frames
-
     return frames
 
 
@@ -326,7 +310,7 @@ def main():
     wandb.config.update({"dataset_size": len(dataset)})
     
     # Create batch server
-    batch_server = PviBatchServer(dataset, input_type="img", output_type="full")
+    batch_server = PviBatchServer(dataset, input_type="image", output_type="minmax")
     
     # Set batch size using the correct method
     batch_server.set_loader_params(batch_size=16, test_size=0.2)

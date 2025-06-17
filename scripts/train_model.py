@@ -127,7 +127,29 @@ def save_configs(exp_dir: Path, data_config: DataConfig,
 
 def main():
     """Main training function."""
-    args = parse_args()
+    # Add proper argument parsing
+    parser = argparse.ArgumentParser(description='Train BP prediction models')
+    parser.add_argument('--config', type=str, required=True, help='Path to config file')
+    parser.add_argument('--data-dir', type=str, help='Override data directory')
+    parser.add_argument('--output-dir', type=str, help='Override output directory')
+    parser.add_argument('--device', type=str, default='auto', help='Device to use')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    
+    args = parser.parse_args()
+    
+    # Add proper error handling
+    try:
+        config = create_config_from_yaml(args.config)
+        if args.data_dir:
+            config.data.root_path = args.data_dir
+        if args.output_dir:
+            config.training.output_dir = args.output_dir
+            
+        # Setup logging
+        setup_logging(
+            level=logging.DEBUG if args.debug else logging.INFO,
+            log_file=Path(config.training.output_dir) / 'training.log'
+        )
     
     # Set up logging
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -135,18 +157,11 @@ def main():
     
     logger.info("Starting BP prediction model training")
     logger.info(f"Arguments: {args}")
-    
-    try:
-        # Load configuration
-        logger.info(f"Loading configuration from {args.config}")
-        configs = create_config_from_yaml(args.config)
-        #logger.info(f"Configs: {configs}")
-        data_config, model_config, training_config = configs
         
         # Set WANDB environment variables for HPC compatibility
-        if hasattr(training_config, 'wandb_mode'):
-            os.environ['WANDB_MODE'] = training_config.wandb_mode
-        if hasattr(training_config, 'use_wandb') and not training_config.use_wandb:
+        if hasattr(config.training, 'wandb_mode'):
+            os.environ['WANDB_MODE'] = config.training.wandb_mode
+        if hasattr(config.training, 'use_wandb') and not config.training.use_wandb:
             os.environ['WANDB_MODE'] = 'disabled'
         
         # Additional wandb settings for HPC environments
@@ -155,12 +170,12 @@ def main():
         
         # Override config with command line arguments
         if args.data_dir:
-            data_config.root_path = str(Path(args.data_dir))
+            config.data.root_path = str(Path(args.data_dir))
         if args.output_dir:
-            training_config.output_dir = Path(args.output_dir)
+            config.training.output_dir = Path(args.output_dir)
         
         # Validate configuration
-        if not validate_config(data_config, model_config, training_config):
+        if not validate_config(config.data, config.model, config.training):
             logger.error("Configuration validation failed")
             return 1
         
@@ -169,21 +184,21 @@ def main():
         
         # Create experiment directory
         exp_dir = create_experiment_dir(
-            training_config.output_dir, 
-            model_config.model_type
+            config.training.output_dir, 
+            config.model.model_type
         )
         logger.info(f"Experiment directory: {exp_dir}")
         
         # Update training config with experiment paths
-        training_config.checkpoint_dir = exp_dir / "checkpoints"
+        config.training.checkpoint_dir = exp_dir / "checkpoints"
         
         # Save configurations
-        save_configs(exp_dir, data_config, model_config, training_config)
+        save_configs(exp_dir, config.data, config.model, config.training)
         
         # Create data loaders
         logger.info("Creating data loaders...")
         data_loaders, data_manager = create_data_loaders(
-            data_config=data_config,
+            data_config=config.data,
             cache_dir=exp_dir / "cache",
             splits=['train', 'val', 'test'],
             verbose=True
@@ -201,19 +216,19 @@ def main():
             return 1
         
         # Create model
-        logger.info(f"Creating {model_config.model_type} model...")
-        model = create_model(model_config)
+        logger.info(f"Creating {config.model.model_type} model...")
+        model = create_model(config.model)
         logger.info(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
         
         # Create trainer
         logger.info("Creating trainer...")
         trainer = create_trainer(
-            model_type=model_config.model_type,
+            model_type=config.model.model_type,
             model=model,
             train_loader=data_loaders['train'],
             val_loader=data_loaders['val'],
-            config=training_config,
-            model_config=model_config,
+            config=config.training,
+            model_config=config.model,
             device=device
         )
         
@@ -238,11 +253,8 @@ def main():
         return 0
         
     except Exception as e:
-        logger.error(f"Training failed with error: {e}")
-        if args.debug:
-            import traceback
-            traceback.print_exc()
-        return 1
+        logger.error(f"Training failed: {str(e)}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

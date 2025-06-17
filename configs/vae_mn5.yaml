@@ -1,5 +1,5 @@
 data_config:
-  root_path: "/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data"
+  root_path: "/home/lucas_takanori/phd/data"
   subject: "subject001"
   session: "baseline"
   cache_dir: null
@@ -51,4 +51,4 @@ training_config:
   wandb_mode: "offline"
   
   # Output
-  output_dir: "/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/vae_outputs" 
+  output_dir: "experiments/vae" 

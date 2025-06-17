@@ -9,3 +9,7 @@
 /train/optimized_output
 *__pycache__
 /vae_outputs
+/experiments
+/cache
+/test_bilstm_output
+/test_vae_output

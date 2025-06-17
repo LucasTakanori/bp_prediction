@@ -91,57 +91,34 @@ class TrainingState:
 class BaseTrainer:
     """Base trainer class with common functionality."""
     
-    def __init__(
-        self,
-        model: nn.Module,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
-        config: TrainingConfig,
-        model_config: ModelConfig,
-        device: torch.device = None,
-        logger_name: str = "trainer"
-    ):
-        """
-        Initialize base trainer.
-        
-        Args:
-            model: PyTorch model to train
-            train_loader: Training data loader
-            val_loader: Validation data loader
-            config: Training configuration
-            model_config: Model configuration
-            device: Computing device
-            logger_name: Logger name
-        """
+    def __init__(self, model, train_loader, val_loader, config, **kwargs):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.config = config
-        self.model_config = model_config
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.logger = logging.getLogger(logger_name)
+        self.device = kwargs.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
         
-        # Move model to device
-        self.model.to(self.device)
-        
-        # Initialize training components
-        self.optimizer = self._create_optimizer()
-        self.scheduler = self._create_scheduler()
-        self.scaler = GradScaler(device='cuda') if config.use_mixed_precision and torch.cuda.is_available() else None
-        
-        # Initialize metrics and callbacks
-        self.metrics_calculator = MetricsCalculator()
-        self.callback_manager = CallbackManager()
+        # Add proper initialization
+        self._setup_training()
+        self._setup_logging()
         self._setup_callbacks()
         
-        # Initialize logging
-        self.use_wandb = config.use_wandb
+    def _setup_training(self):
+        """Setup optimizer, scheduler, and other training components"""
+        self.optimizer = self._create_optimizer()
+        self.scheduler = self._create_scheduler()
+        self.scaler = torch.cuda.amp.GradScaler() if self.config.training.use_mixed_precision else None
         
-        # Training state
-        self.state = TrainingState()
+    def _setup_logging(self):
+        """Setup logging and metrics tracking"""
+        self.logger = get_logger(self.__class__.__name__)
+        self.metrics = MetricsCalculator()
         
-        self.logger.info(f"Trainer initialized on device: {self.device}")
-        self.logger.info(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+    def _setup_callbacks(self):
+        """Setup training callbacks"""
+        self.callbacks = CallbackManager()
+        self.callbacks.add_callback('checkpoint', ModelCheckpoint(...))
+        self.callbacks.add_callback('early_stopping', EarlyStopping(...))
     
     def _create_optimizer(self) -> optim.Optimizer:
         """Create optimizer based on configuration."""
@@ -196,42 +173,6 @@ class BaseTrainer:
             )
         else:
             return None
-    
-    def _setup_callbacks(self):
-        """Setup training callbacks."""
-        # Early stopping
-        if self.config.early_stopping_patience > 0:
-            early_stopping = EarlyStopping(
-                patience=self.config.early_stopping_patience,
-                min_delta=self.config.early_stopping_min_delta,
-                mode='min'
-            )
-            self.callback_manager.add_callback('early_stopping', early_stopping)
-        
-        # Model checkpointing (best model only)
-        if self.config.checkpoint_dir:
-            checkpoint_callback = ModelCheckpoint(
-                checkpoint_dir=self.config.checkpoint_dir,
-                save_best_only=True,
-                mode='min',
-                verbose=True
-            )
-            self.callback_manager.add_callback('model_checkpoint', checkpoint_callback)
-            
-            # Periodic checkpointing (every N epochs)
-            save_frequency = getattr(self.config, 'save_every_n_epochs', 5)
-            periodic_callback = PeriodicCheckpoint(
-                checkpoint_dir=self.config.checkpoint_dir,
-                save_frequency=save_frequency,
-                verbose=True
-            )
-            periodic_callback.set_trainer(self)
-            self.callback_manager.add_callback('periodic_checkpoint', periodic_callback)
-        
-        # Learning rate scheduling
-        if self.scheduler:
-            lr_scheduler = LearningRateScheduler(self.scheduler)
-            self.callback_manager.add_callback('lr_scheduler', lr_scheduler)
     
     def save_checkpoint(self, filepath: Path, is_best: bool = False):
         """Save training checkpoint."""

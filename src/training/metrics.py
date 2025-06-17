@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple, Optional
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import logging
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -23,56 +24,49 @@ class MetricsCalculator:
         Args:
             bp_norm_range: (min, max) values used for BP normalization
         """
-        self.bp_min, self.bp_max = bp_norm_range
+        self.bp_norm_range = bp_norm_range
+        self.metrics_history = []
     
     def denormalize_bp(self, normalized_bp: torch.Tensor) -> torch.Tensor:
         """Denormalize BP values back to mmHg."""
-        return normalized_bp * (self.bp_max - self.bp_min) + self.bp_min
+        return normalized_bp * (self.bp_norm_range[1] - self.bp_norm_range[0]) + self.bp_norm_range[0]
+    
+    def _compute_systolic_error(self, predictions: torch.Tensor, targets: torch.Tensor) -> float:
+        """Compute systolic pressure error."""
+        pred_systolic = torch.max(predictions, dim=-1)[0]
+        target_systolic = torch.max(targets, dim=-1)[0]
+        return F.l1_loss(pred_systolic, target_systolic).item()
+    
+    def _compute_diastolic_error(self, predictions: torch.Tensor, targets: torch.Tensor) -> float:
+        """Compute diastolic pressure error."""
+        pred_diastolic = torch.min(predictions, dim=-1)[0]
+        target_diastolic = torch.min(targets, dim=-1)[0]
+        return F.l1_loss(pred_diastolic, target_diastolic).item()
     
     def compute_bp_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
         """
         Compute basic BP prediction metrics.
         
         Args:
-            predictions: Predicted BP values [batch, bp_length]
-            targets: Target BP values [batch, bp_length]
+            predictions: Predicted BP values
+            targets: Target BP values
             
         Returns:
             Dictionary of metrics
         """
-        # Convert to numpy for easier computation
-        pred_np = predictions.detach().cpu().numpy()
-        target_np = targets.detach().cpu().numpy()
-        
-        # Denormalize if needed (assume inputs are normalized)
-        if pred_np.max() <= 1.0 and pred_np.min() >= 0.0:
-            pred_np = pred_np * (self.bp_max - self.bp_min) + self.bp_min
-            target_np = target_np * (self.bp_max - self.bp_min) + self.bp_min
-        
-        metrics = {}
-        
-        # Basic regression metrics
-        pred_flat = pred_np.flatten()
-        target_flat = target_np.flatten()
-        
-        metrics['mae'] = mean_absolute_error(target_flat, pred_flat)
-        metrics['mse'] = mean_squared_error(target_flat, pred_flat)
-        metrics['rmse'] = np.sqrt(metrics['mse'])
-        
-        # R-squared
         try:
-            metrics['r2'] = r2_score(target_flat, pred_flat)
-        except:
-            metrics['r2'] = 0.0
-        
-        # Correlation
-        try:
-            corr, _ = pearsonr(target_flat, pred_flat)
-            metrics['correlation'] = corr if not np.isnan(corr) else 0.0
-        except:
-            metrics['correlation'] = 0.0
-        
-        return metrics
+            metrics = {
+                'mse': F.mse_loss(predictions, targets).item(),
+                'mae': F.l1_loss(predictions, targets).item(),
+                'systolic_error': self._compute_systolic_error(predictions, targets),
+                'diastolic_error': self._compute_diastolic_error(predictions, targets)
+            }
+            
+            self.metrics_history.append(metrics)
+            return metrics
+        except Exception as e:
+            logger.error(f"Error computing metrics: {str(e)}")
+            return {}
     
     def compute_clinical_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
         """
@@ -91,8 +85,8 @@ class MetricsCalculator:
         
         # Denormalize if needed
         if pred_np.max() <= 1.0 and pred_np.min() >= 0.0:
-            pred_np = pred_np * (self.bp_max - self.bp_min) + self.bp_min
-            target_np = target_np * (self.bp_max - self.bp_min) + self.bp_min
+            pred_np = pred_np * (self.bp_norm_range[1] - self.bp_norm_range[0]) + self.bp_norm_range[0]
+            target_np = target_np * (self.bp_norm_range[1] - self.bp_norm_range[0]) + self.bp_norm_range[0]
         
         metrics = {}
         
@@ -268,8 +262,8 @@ class MetricsCalculator:
         
         # Denormalize if needed
         if pred_np.max() <= 1.0 and pred_np.min() >= 0.0:
-            pred_np = pred_np * (self.bp_max - self.bp_min) + self.bp_min
-            target_np = target_np * (self.bp_max - self.bp_min) + self.bp_min
+            pred_np = pred_np * (self.bp_norm_range[1] - self.bp_norm_range[0]) + self.bp_norm_range[0]
+            target_np = target_np * (self.bp_norm_range[1] - self.bp_norm_range[0]) + self.bp_norm_range[0]
         
         errors = pred_np - target_np
         

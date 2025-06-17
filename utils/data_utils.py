@@ -19,8 +19,8 @@ from sklearn.model_selection import train_test_split
 class DataPathManager:
     
     class __DefaultPaths: # private attributes to get default directory
-        root: str = r"/home/lucas_takanori/phd/data"
-        subject: str = "subject012"
+        root: str = os.getenv('BP_DATA_ROOT', '/home/lucas_takanori/phd/data')
+        subject: str = "subject001"
         session: str = "baseline"
         # postfix: str = "segmented" # currently not in use
 
@@ -68,7 +68,6 @@ class DataPathManager:
         print(f"Session: {self._session}")
         print(f"Target file: {self._h5_name}")
         print(f"Location: {self._masked_dir}")
-        
         
     def _make_results_dir(self):
         output_dir = self._output / self._session / "_results_ml"
@@ -250,118 +249,95 @@ class PviBatchServer:
                  ) -> None:
         
         # self.num_samples = len(dataset)
-        self.file_name = dataset.file_name
-        
+        self.dataset = dataset
         self.input_type = self._validate_input_type(input_type)
         self.output_type = self._validate_output_type(output_type)
-        self.dataset = self._extract_dataset(dataset)
-        print("PviBatchServer successfully initiated!")
         
-        self.set_loader_params(batch_size=16, test_size=0.2, reload=False)
-        
-        self.reload()
+        self._extracted_data = self._extract_dataset(dataset)
+        self._print_init()
         
     def _validate_input_type(self, input_type: str) -> str:
-        valids = ["img", "bioz", "signal"]
-        if input_type.lower() not in valids:
-            raise ValueError(f"input_type must be one of {valids}")
-        return input_type.lower()
+        valid_types = ["signal", "image"]
+        if input_type not in valid_types:
+            raise ValueError(f"Invalid input_type '{input_type}'. Must be one of {valid_types}")
+        return input_type
     
     def _validate_output_type(self, output_type: str) -> str:
-        valids = ["full", "sbp", "dbp", "minmax"]
-        if output_type.lower() not in valids:
-            raise ValueError(f"output_type must be one of {valids}")
-        return output_type.lower()
+        valid_types = ["minmax", "mean", "std"]
+        if output_type not in valid_types:
+            raise ValueError(f"Invalid output_type '{output_type}'. Must be one of {valid_types}")
+        return output_type
             
     def _extract_dataset(self,
                          dataset: PviDataset) -> list[Dict]:
-        # dataset_clone = copy.deepcopy(dataset)
-
-        # # Intended shape exported from MATLAB: [N, H, W ,T] (Fortran layout)
-        # # Actual shape read into from NumPy: [T, W, H ,N] (C layout)
-        # # Desired shape in PyTorch: [N, C, H, W, T] (we will deal with this later)
-        samples = []
-        for ds in dataset.samples:
-            sample = {}
-
-            if self.output_type == 'full':
-                sample['bp'] = ds['bp']['signal']
-            else:
-                sbp = ds['bp']['signal'].max()
-                dbp = ds['bp']['signal'].min()
-                if self.output_type == "sbp":
-                    ds['bp'] = sbp
-                elif self.output_type == "dbp":
-                    sample['bp'] = dbp
-                else:
-                    sample['bp'] = torch.hstack([dbp,sbp])
+        extracted_data = []
+        for sample in dataset:
+            extracted_sample = {}
             
-            for pvi_key in ["pviLP", "pviHP"]:
-                if self.input_type == "bioz":
-                    r = ds[pvi_key]["resistance"]
-                    x = ds[pvi_key]["reactance"]
-                    sample[pvi_key] = torch.vstack([r,x])
-                else:
-                    # add channel dims
-                    sample[pvi_key] = ds[pvi_key][self.input_type].unsqueeze(dim=0)
+            # Extract input data
+            if self.input_type == "signal":
+                # For signal input, use PVI signal
+                extracted_sample['input'] = sample['pviHP']['signal']
+            else:  # image input
+                # For image input, use PVI image data
+                extracted_sample['input'] = sample['pviHP']['img']
             
-            sample['stats'] = ds['stats']
+            # Extract output data (simplified - using BP signal for now)
+            if self.output_type == "minmax":
+                # Use BP signal min/max as output
+                bp_signal = sample['bp']['signal']
+                extracted_sample['output'] = torch.stack([
+                    torch.min(bp_signal),
+                    torch.max(bp_signal)
+                ])
+            elif self.output_type == "mean":
+                # Use BP signal mean as output
+                bp_signal = sample['bp']['signal']
+                extracted_sample['output'] = torch.mean(bp_signal).unsqueeze(0)
+            else:  # std output
+                # Use BP signal std as output
+                bp_signal = sample['bp']['signal']
+                extracted_sample['output'] = torch.std(bp_signal).unsqueeze(0)
             
-            samples.append(sample)
+            extracted_data.append(extracted_sample)
         
-        # dataset_clone.samples = samples
-        
-        return samples
+        return extracted_data
         
     def _print_init(self) -> None:
-        _, test_loader = self.get_loaders()
-        test_batch = next(iter(test_loader))
-        keys = test_batch.keys()
-        
         self.class_name = self.__class__.__name__
         print()
         print(f"====={self.class_name}=====")
-        print(f"Dataset name: {self.file_name}")
-        print(f"Number of samples: {len(self.dataset)}")
-        print(f"Test size: {self.test_size}")
-        print(f"Batch size: {self.batch_size}")
-        print(f"Random state: {self.random_state}")
-        print(f"Data keys: {list(keys)}")
-        print(f"\t PVI type (input): {self.input_type}")
-        print(f"\t BP type (output): {self.output_type}")
+        print(f"Input type: {self.input_type}")
+        print(f"Output type: {self.output_type}")
+        print(f"Number of samples: {len(self._extracted_data)}")
         
-        print("Batch shape:")
-        for key, obj in test_batch.items():
-            if isinstance(obj,dict):
-                for k2 in obj.keys():
-                    shape = tuple(obj[k2].shape)
-                    tmp = '.'.join([key,k2])
-                    print(f"\t {tmp}: {shape}")
-                    
-            else: # value is a tensor
-                shape = tuple(obj.shape)
-                print(f"\t {key}: {shape}")
+        # Print shapes
+        sample = self._extracted_data[0]
+        print("Data shapes:")
+        print(f"\tInput: {sample['input'].shape}")
+        print(f"\tOutput: {sample['output'].shape}")
         
     def reload(self):
-        self._data_subset = self._split_datasets()
-        self.loaders = self._init_loaders()
+        """Reload the dataset"""
+        self._extracted_data = self._extract_dataset(self.dataset)
 
     def _split_datasets(self, shuffle: bool=True):
-        indices = list(range(len(self.dataset)))
-        train_idx, test_idx = train_test_split(
-            indices,
-            test_size=self.test_size,
-            random_state=self.random_state,
-            shuffle=shuffle)
+        """Split the dataset into train and test sets"""
+        if shuffle:
+            np.random.shuffle(self._extracted_data)
         
-        data_subset = {}
-        data_subset["train"] = Subset(self.dataset, train_idx)
-        data_subset["test"] = Subset(self.dataset, test_idx)
+        # Split into train and test sets
+        split_idx = int(len(self._extracted_data) * 0.8)  # 80% train, 20% test
+        train_data = self._extracted_data[:split_idx]
+        test_data = self._extracted_data[split_idx:]
         
-        return data_subset
+        return train_data, test_data
         
     def get_data_subsets(self) -> Tuple[Subset]:
-        return tuple(self._data_subset.values())
+        """Get train and test subsets"""
+        train_data, test_data = self._split_datasets()
+        return Subset(self._extracted_data, range(len(train_data))), \
+               Subset(self._extracted_data, range(len(train_data), len(self._extracted_data)))
     
     def set_loader_params(self,
                            batch_size: int,
@@ -369,97 +345,77 @@ class PviBatchServer:
                            random_state: Optional[int] = None,
                            reload: bool = True,
                            **kwargs) -> None:
-        self.batch_size = batch_size
-        self.test_size = test_size
-        self.random_state = random_state
-        self.datasetloader_kwargs = kwargs
-        
+        """Set parameters for data loading"""
         if reload:
             self.reload()
         
+        self.batch_size = batch_size
+        self.test_size = test_size
+        self.random_state = random_state
+        
+        # Initialize data loaders
+        self._init_loaders()
+        
     def _init_loaders(self) -> Dict[str, DataLoader]:
-        loaders = {}
-        loaders["train"] = DataLoader(self._data_subset["train"],
+        """Initialize data loaders"""
+        train_subset, test_subset = self.get_data_subsets()
+        
+        self.train_loader = DataLoader(
+            train_subset,
                             batch_size=self.batch_size,
                             shuffle=True,
-                            **self.datasetloader_kwargs)
+            num_workers=4,
+            pin_memory=True
+        )
         
-        loaders["test"] = DataLoader(self._data_subset["test"],
+        self.test_loader = DataLoader(
+            test_subset,
                             batch_size=self.batch_size,
                             shuffle=False,
-                            **self.datasetloader_kwargs)
-        return loaders
+            num_workers=4,
+            pin_memory=True
+        )
+        
+        return {
+            'train': self.train_loader,
+            'test': self.test_loader
+        }
 
     def get_loaders(self) -> Tuple[DataLoader]:
-        return tuple(self.loaders.values())
-        
-    # def get_train_loader(self) -> DataLoader:
-    #     return self.loaders["train"]
-    
-    # def get_test_loader(self) -> DataLoader:
-    #     return self.loaders["test"]
+        """Get train and test data loaders"""
+        return self.train_loader, self.test_loader
     
     def get_data_shapes(self) -> Dict[str, Dict[str, Tuple]]:
-        shapes = {}
-        sample = self.dataset[0]
-        
-        shapes['batch_size'] = self.batch_size
-        shapes['input'] = tuple(sample['pviHP'].shape)
-        shapes['output'] = tuple(sample['bp'].shape)
-        
-        if 'stats' in sample:
-            num_stats = len(sample['stats'])
-            stats_length = len(next(iter(sample['stats'].items()))[1])
-            shapes['stats'] = (num_stats, stats_length)
-        
-        return shapes
+        """Get shapes of input and output data"""
+        sample = self._extracted_data[0]
+        return {
+            'input': sample['input'].shape,
+            'output': sample['output'].shape
+        }
 
-# Testing ground:
 def load_subjects(subject_idx: list[int],
                   session="baseline",
                   root=r"/home/lucas_takanori/phd/data",
                   ) -> Tuple:
-    if type(subject_idx) not in [list, tuple, range]:
-        subject_idx = [subject_idx]
-        
+    """Load multiple subjects' data"""
     datasets = []
-    
-    for k in subject_idx:
-        subject_id = 'subject' + str(k).zfill(3) 
-        print(f"Testing with {subject_id}...")
-        
-        pm = DataPathManager(
-            subject=subject_id,
-            session=session,
-            root=root)
-        
-        dataset = PviDataset(pm._h5_path)
-        
-        pm._print_init()
-        dataset._print_init()
-        
+    for idx in subject_idx:
+        subject = f"subject{idx:03d}"
+        path_manager = DataPathManager(subject=subject, session=session, root=root)
+        dataset = PviDataset(path_manager._h5_path)
         datasets.append(dataset)
-    
     return tuple(datasets)
 
 def prep_servers(pvi_datasets: Tuple['PviDataset'],
                  input_type="signal",
                  output_type="minmax",
                  ) -> Tuple['PviBatchServer']:
-    if type(pvi_datasets) not in [list, tuple, range]:
-        pvi_datasets = [pvi_datasets]
-        
-    feeders = []
+    """Prepare batch servers for multiple datasets"""
+    servers = []
     for dataset in pvi_datasets:
-        feeder = PviBatchServer(dataset=dataset,
-                                input_type=input_type,
-                                output_type=output_type)
-        
-        feeder._print_init()
-        
-        feeders.append(feeder)
-     
-    return tuple(feeders)
+        server = PviBatchServer(dataset, input_type, output_type)
+        servers.append(server)
+    return tuple(servers)
 
 if __name__ == "__main__":
     print("tmp...")

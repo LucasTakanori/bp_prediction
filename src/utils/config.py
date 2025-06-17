@@ -6,16 +6,60 @@ Handles paths, model parameters, and training configurations.
 import os
 import yaml
 import json
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, Union, Tuple, List
 from dataclasses import dataclass, asdict
-import torch
+
+# Optional import for torch - will be needed for training but not validation
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+    torch = None
+
+
+def substitute_env_vars(data):
+    """
+    Recursively substitute environment variables in data structure.
+    Supports ${VAR:default} syntax and converts numeric strings to proper types.
+    """
+    if isinstance(data, dict):
+        return {key: substitute_env_vars(value) for key, value in data.items()}
+    elif isinstance(data, list):
+        return [substitute_env_vars(item) for item in data]
+    elif isinstance(data, str):
+        # Pattern to match ${VAR:default} or ${VAR}
+        pattern = r'\$\{([^}:]+)(?::([^}]*))?\}'
+        
+        def replace_env_var(match):
+            var_name = match.group(1)
+            default_value = match.group(2) if match.group(2) is not None else ""
+            return os.getenv(var_name, default_value)
+        
+        result = re.sub(pattern, replace_env_var, data)
+        
+        # Try to convert numeric strings to appropriate types
+        # This handles both substituted values and original numeric strings
+        try:
+            # Try float first (handles scientific notation like 1e-4)
+            if '.' in result or 'e' in result.lower() or 'E' in result:
+                return float(result)
+            # Try integer
+            return int(result)
+        except ValueError:
+            # If conversion fails, return as string
+            return result
+    else:
+        return data
 
 
 @dataclass
 class DataConfig:
     """Data-related configuration"""
-    root_path: str = os.getenv('BP_DATA_ROOT', '/gpfs/projects/bsc88/speech/research/data')
+    # Use environment variables for paths
+    root_path: str = os.getenv('BP_DATA_ROOT', '/home/lucas_takanori/phd/data')
     subject: str = "subject001"
     session: str = "baseline"
     cache_dir: Optional[str] = None
@@ -35,6 +79,10 @@ class DataConfig:
     return_metadata: bool = True
     
     def __post_init__(self):
+        if not os.path.exists(self.root_path):
+            raise ValueError(f"Data root path does not exist: {self.root_path}")
+        if not self.subject.startswith("subject"):
+            raise ValueError("Subject must start with 'subject'")
         if self.pattern_offsets is None:
             self.pattern_offsets = [-7, 0, 3]
     
@@ -130,8 +178,11 @@ class TrainingConfig:
     adam_betas: Tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 1e-5
     
-    # VAE specific
+    # VAE specific parameters
     vae_beta: float = 1.0
+    beta_min: float = 0.01
+    beta_max: float = 1.0
+    beta_warmup_epochs: int = 15
     
     # Scheduler
     use_scheduler: bool = True
@@ -184,6 +235,7 @@ class ModelConfig:
     use_batch_norm: bool = True
     
     # BiLSTM parameters  
+    input_dim: int = 256  # For BiLSTM models - should match VAE latent_dim
     hidden_dim: int = 256
     num_layers: int = 3
     bidirectional: bool = True
@@ -233,6 +285,10 @@ class Config:
         """Load configuration from YAML file"""
         with open(yaml_path, 'r') as f:
             config_dict = yaml.safe_load(f)
+        
+        # Substitute environment variables
+        config_dict = substitute_env_vars(config_dict)
+        
         return cls.from_dict(config_dict)
     
     @classmethod
@@ -240,6 +296,10 @@ class Config:
         """Load configuration from JSON file"""
         with open(json_path, 'r') as f:
             config_dict = json.load(f)
+        
+        # Substitute environment variables
+        config_dict = substitute_env_vars(config_dict)
+        
         return cls.from_dict(config_dict)
     
     @classmethod
@@ -277,11 +337,14 @@ class Config:
         with open(json_path, 'w') as f:
             json.dump(self.to_dict(), f, indent=2)
     
-    def get_device(self) -> torch.device:
+    def get_device(self):
         """Get the appropriate device for training"""
-        if self.training.device == "auto":
+        if not HAS_TORCH:
+            raise ImportError("PyTorch is required for training but not installed")
+        
+        if hasattr(self.training, 'device') and self.training.device == "auto":
             return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        return torch.device(self.training.device)
+        return torch.device(getattr(self.training, 'device', 'cpu'))
 
 
 def create_default_config() -> Config:
@@ -333,6 +396,9 @@ def create_config_from_yaml(yaml_path: Union[str, Path]) -> Tuple[DataConfig, Mo
     """
     with open(yaml_path, 'r') as f:
         config_dict = yaml.safe_load(f)
+    
+    # Substitute environment variables
+    config_dict = substitute_env_vars(config_dict)
     
     # Create individual config objects
     data_config = DataConfig(**config_dict.get('data_config', {}))

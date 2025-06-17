@@ -1,0 +1,22 @@
+{
+  "latent_dim": 512,
+  "num_samples": 400,
+  "mean_magnitude": 4.002015590667725,
+  "std_magnitude": 1.8875123262405396,
+  "mean_activation": -0.0002451022737659514,
+  "std_activation": 0.1955500990152359,
+  "activation_range": [
+    -9.244876861572266,
+    6.815288543701172
+  ],
+  "sparsity": 0.4531298828125,
+  "variance_explained_80pct": 6,
+  "variance_explained_90pct": 8,
+  "effective_dimensions": 25,
+  "max_correlation": 0.9266194583455554,
+  "effective_rank": 9.873812344258685,
+  "participation_ratio": 7.968859603482618,
+  "redundancy": 0.3888842011754205,
+  "information_compression_ratio": 0.019284789734880244,
+  "dimension_utilization_ratio": 0.015564178913051988
+}

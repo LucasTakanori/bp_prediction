@@ -15,6 +15,10 @@ vae_outputs/
 vae_output_1/
 wandb/
 lstm_outputs/
+experiments/
+cache/
+test_bilstm_output/
+test_vae_output/
 
 # C extensions
 *.so
