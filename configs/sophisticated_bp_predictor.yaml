@@ -1,0 +1,261 @@
+# Sophisticated BP Predictor Configuration
+# Advanced deep learning system for continuous blood pressure prediction from PVI image sequences
+# Features: Pre-trained VAE + Enhanced BiLSTM + Multi-Head Self-Attention + 10-Frame Sliding Window
+
+environment:
+  data_root: "/home/lucas_takanori/phd/data"
+  experiments_root: "./experiments"
+  cache_dir: "./cache"
+
+data_config:
+  # Path configuration
+  root_path: "/home/lucas_takanori/phd/data"
+  data_file: "subject001_baseline_masked.h5"  # Single subject or multiple subjects
+  subjects: ["subject001"] #, "subject002", "subject003"]  # For multi-subject training
+  session: "baseline"
+  
+  # Data loading options
+  preload_to_memory: false
+  use_mmap: true
+  force_reload: false
+  return_metadata: true
+  
+  # Advanced sequence parameters for sophisticated model
+  pattern_offsets: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]  # 10-frame sliding window
+  sequence_length: 10  # Matches pattern_offsets length
+  
+  # Data splits
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  
+  # Normalization parameters
+  bp_normalization: [40.0, 200.0]  # mmHg range
+  frame_normalization: "minmax"    # PVI frame normalization
+  
+  # Data augmentation (future enhancement)
+  use_augmentation: false
+  noise_level: 0.01
+
+model_config:
+  model_type: "sophisticated_bp_predictor"
+  
+  # VAE Configuration (Pre-trained)
+  vae_config:
+    latent_dim: 64
+    freeze_vae: true  # Keep VAE frozen during training
+    vae_checkpoint_path: "/home/lucas_takanori/phd/bp_prediction/experiments/experiment_20250617_145515/checkpoints/vae_best.pt"
+  
+  # Enhanced BiLSTM Configuration
+  bilstm_config:
+    input_dim: 64      # Should match VAE latent_dim
+    hidden_dim: 256
+    num_layers: 3
+    output_dim: 50      # BP waveform length
+    bidirectional: true
+    dropout_rate: 0.3
+    
+  # Multi-Head Self-Attention Configuration
+  attention_config:
+    use_attention: true
+    attention_type: "multi_head_self_attention"  # or "temporal_attention"
+    attention_dim: 128
+    num_attention_heads: 8
+    attention_dropout: 0.1
+    
+  # Auxiliary Prediction Heads
+  auxiliary_heads:
+    use_auxiliary_heads: true
+    systolic_head: true   # Predict systolic values directly
+    diastolic_head: true  # Predict diastolic values directly
+    
+  # Advanced Features
+  advanced_features:
+    use_residual_connections: true
+    use_layer_norm: true
+    use_gradient_checkpointing: false  # For memory efficiency
+
+training_config:
+  # Basic training parameters
+  num_epochs: 15
+  batch_size: 8
+  learning_rate: 0.0001
+  optimizer: "adam"
+  weight_decay: 1e-5
+  
+  # Advanced optimizer settings
+  optimizer_config:
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    amsgrad: false
+  
+  # Learning rate scheduler
+  scheduler_config:
+    use_scheduler: true
+    scheduler_type: "cosine"  # cosine, step, exponential, reduce_on_plateau
+    T_max: 25  # For cosine annealing
+    eta_min: 1e-6
+    scheduler_patience: 10  # For ReduceLROnPlateau
+    factor: 0.5
+    
+  # Mixed precision and optimization
+  optimization:
+    use_mixed_precision: false  # Set to true for faster training on newer GPUs
+    grad_clip_norm: 1.0
+    accumulate_grad_batches: 1  # Gradient accumulation
+    
+  # Early stopping
+  early_stopping:
+    patience: 15
+    min_delta: 1e-4
+    monitor: "val_loss"
+    mode: "min"
+    
+  # Checkpointing
+  checkpointing:
+    save_every_n_epochs: 5
+    save_best_only: false
+    save_last: true
+    monitor: "val_loss"
+    
+  # Validation
+  validation:
+    check_val_every_n_epoch: 1
+    val_check_interval: 1.0
+
+loss_config:
+  # Primary loss configuration
+  loss_type: "composite"  # Options: mse, systolic_distance, diastolic_distance, composite
+  
+  # Composite loss weights (must sum to 1.0 or will be normalized)
+  loss_weights:
+    waveform_weight: 0.6    # MSE loss on full waveform
+    systolic_weight: 0.2    # Loss on systolic values
+    diastolic_weight: 0.2   # Loss on diastolic values
+    
+  # Advanced loss parameters
+  loss_params:
+    reduction: "mean"
+    label_smoothing: 0.0
+    
+  # BP calculation method
+  bp_extraction:
+    systolic_method: "max"  # Maximum value in waveform
+    diastolic_method: "min_after_systolic"  # Min value after systolic peak
+    
+  # Normalization for loss calculation
+  normalize_for_loss: true
+  bp_norm_range: [40.0, 200.0]
+
+logging_config:
+  # Basic logging
+  level: "INFO"
+  log_every_n_steps: 50
+  
+  # Weights & Biases
+  wandb:
+    use_wandb: false
+    project: "sophisticated-bp-prediction"
+    entity: null
+    mode: "offline"  # online, offline, disabled
+    tags: ["sophisticated", "bilstm", "attention", "vae"]
+    group: "sophisticated_bp_predictor"
+    
+  # Visualization
+  visualization:
+    visualize_attention: true
+    plot_predictions: true
+    save_prediction_plots: true
+    plot_every_n_epochs: 5
+    num_examples_to_plot: 5
+
+evaluation_config:
+  # Metrics to compute
+  metrics:
+    - "mse"
+    - "mae" 
+    - "r2"
+    - "systolic_mae"
+    - "diastolic_mae"
+    - "systolic_error"
+    - "diastolic_error"
+    
+  # Clinical evaluation
+  clinical_metrics:
+    compute_bland_altman: true
+    compute_correlation: true
+    compute_agreement_metrics: true
+    
+  # Evaluation frequency
+  eval_frequency:
+    train_eval_frequency: 5  # Evaluate on train set every N epochs
+    detailed_eval_frequency: 10  # Detailed evaluation every N epochs
+
+# Hardware and performance
+hardware_config:
+  # Device configuration
+  device: "auto"  # auto, cpu, cuda, cuda:0, etc.
+  num_workers: 4   # DataLoader workers
+  pin_memory: true
+  persistent_workers: true
+  
+  # Memory optimization
+  memory_optimization:
+    empty_cache_every_n_steps: 100
+    max_memory_usage: 0.9  # Fraction of GPU memory to use
+
+# Output configuration
+output_config:
+  # Directory structure
+  output_dir: "./experiments/sophisticated_bp_predictor"
+  experiment_name: "sophisticated_bp_predictor_v1"
+  
+  # Results saving
+  save_results:
+    save_predictions: true
+    save_attention_weights: true
+    save_model_summary: true
+    save_config: true
+    
+  # Checkpoint naming
+  checkpoint_naming:
+    use_timestamp: true
+    include_metrics: true
+
+# Experiment metadata
+experiment_info:
+  name: "sophisticated_bp_predictor"
+  description: |
+    Advanced deep learning system for continuous blood pressure prediction from 
+    photoplethysmography volume intensity (PVI) image sequences. Features:
+    - Pre-trained VAE encoder (frozen) for feature extraction
+    - Enhanced BiLSTM with multi-head self-attention
+    - 10-frame sliding window temporal pattern
+    - Physiologically-informed systolic/diastolic extraction
+    - Composite loss function with multiple components
+    - Medical-grade evaluation metrics
+  version: "1.0.0"
+  author: "Sophisticated BP Prediction System"
+  created_date: "2025-01-17"
+  
+# Advanced configuration
+advanced_config:
+  # Reproducibility
+  seed: 42
+  deterministic: true
+  benchmark: false
+  
+  # Debugging
+  debug_mode: false
+  profile_model: false
+  detect_anomaly: false
+  
+  # Multi-GPU support (future)
+  distributed:
+    use_ddp: false
+    backend: "nccl"
+    find_unused_parameters: false 
+
+normalization:
+  bp_min: 40.0
+  bp_max: 200.0 

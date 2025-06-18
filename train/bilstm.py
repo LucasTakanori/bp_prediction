@@ -2,11 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import os
 import sys
 import numpy as np
 import argparse
+import yaml
 from tqdm import tqdm
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import wandb
@@ -224,7 +226,80 @@ class VAE(nn.Module):
         return x_recon, mu, logvar
 
 
-# Attention mechanism for temporal sequences
+# Multi-Head Self-Attention mechanism for sophisticated temporal modeling
+class MultiHeadSelfAttention(nn.Module):
+    """
+    Multi-head self-attention mechanism optimized for temporal BP prediction.
+    
+    This attention mechanism allows the model to focus on different temporal 
+    relationships simultaneously, crucial for capturing cardiac cycle patterns.
+    """
+    def __init__(self, hidden_dim, num_heads=8, dropout=0.1):
+        super(MultiHeadSelfAttention, self).__init__()
+        assert hidden_dim % num_heads == 0
+        
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        
+        # Linear projections for Q, K, V
+        self.query = nn.Linear(hidden_dim, hidden_dim)
+        self.key = nn.Linear(hidden_dim, hidden_dim)
+        self.value = nn.Linear(hidden_dim, hidden_dim)
+        
+        # Output projection
+        self.output_proj = nn.Linear(hidden_dim, hidden_dim)
+        
+        # Regularization
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        
+        # Scale factor for attention scores
+        self.scale = np.sqrt(self.head_dim)
+        
+    def forward(self, x):
+        """
+        Multi-head self-attention forward pass
+        
+        Args:
+            x: [batch_size, seq_len, hidden_dim] - LSTM output
+            
+        Returns:
+            output: [batch_size, seq_len, hidden_dim] - Attended features
+            attention_weights: [batch_size, seq_len, seq_len] - Average attention weights
+        """
+        batch_size, seq_len, hidden_dim = x.shape
+        
+        # Generate Q, K, V and reshape for multi-head attention
+        Q = self.query(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        K = self.key(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        V = self.value(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Scaled dot-product attention
+        # Shape: [batch_size, num_heads, seq_len, seq_len]
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        attention_weights = F.softmax(attention_scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+        
+        # Apply attention to values
+        # Shape: [batch_size, num_heads, seq_len, head_dim]
+        attended = torch.matmul(attention_weights, V)
+        
+        # Concatenate heads and project
+        # Shape: [batch_size, seq_len, hidden_dim]
+        attended = attended.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_dim)
+        output = self.output_proj(attended)
+        
+        # Residual connection and layer normalization
+        output = self.layer_norm(x + output)
+        
+        # Average attention weights across heads for visualization
+        avg_attention_weights = attention_weights.mean(dim=1)  # [batch_size, seq_len, seq_len]
+        
+        return output, avg_attention_weights
+
+
+# Legacy attention mechanism for backward compatibility
 class TemporalAttention(nn.Module):
     def __init__(self, hidden_dim, attention_dim=128):
         super(TemporalAttention, self).__init__()
@@ -268,127 +343,142 @@ class TemporalAttention(nn.Module):
         return output, attention_weights
 
 
-# Enhanced Bidirectional LSTM model with Attention for blood pressure prediction
+# Enhanced Bidirectional LSTM model with Multi-Head Self-Attention for blood pressure prediction
 class VAEBiLSTMWithAttention(nn.Module):
-    def __init__(self, vae_model, input_dim=256, hidden_dim=256, num_layers=2, 
-                 output_dim=50, dropout=0.3, use_attention=True, attention_dim=128):
+    def __init__(self, vae_model, input_dim=256, hidden_dim=256, num_layers=3, 
+                 output_dim=50, dropout=0.3, use_attention=True, attention_dim=128,
+                 num_attention_heads=8, use_auxiliary_heads=True):
         super(VAEBiLSTMWithAttention, self).__init__()
         
         # Store the pretrained VAE
         self.vae = vae_model
         self.use_attention = use_attention
+        self.use_auxiliary_heads = use_auxiliary_heads
         
-        # Freeze the VAE parameters
+        # Freeze the VAE parameters - CRITICAL for medical application
         for param in self.vae.parameters():
             param.requires_grad = False
         
-        # Input projection layer to enhance features
-        self.input_projection = nn.Linear(input_dim, hidden_dim)
-        self.input_dropout = nn.Dropout(dropout * 0.5)
+        # Enhanced input projection with layer normalization
+        self.input_projection = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout * 0.5)
+        )
         
-        # Bidirectional LSTM for sequence modeling
+        # Bidirectional LSTM for temporal modeling (enhanced capacity)
         self.lstm = nn.LSTM(
             input_size=hidden_dim,    # Use projected features
             hidden_size=hidden_dim,   # Size of hidden state
-            num_layers=num_layers,    # Number of LSTM layers
+            num_layers=num_layers,    # Increased to 3 layers
             batch_first=True,         # Input shape: (batch, seq, feature)
             dropout=dropout if num_layers > 1 else 0,
             bidirectional=True        # Use bidirectional LSTM
         )
         
-        # Attention mechanism for temporal modeling
+        # Multi-Head Self-Attention mechanism for temporal dependencies
         if self.use_attention:
-            self.attention = TemporalAttention(
+            self.attention = MultiHeadSelfAttention(
                 hidden_dim=hidden_dim * 2,  # bidirectional output
-                attention_dim=attention_dim
+                num_heads=num_attention_heads,
+                dropout=dropout
             )
         
-        # Enhanced output layers with time-domain processing
-        self.temporal_conv = nn.Conv1d(
-            in_channels=hidden_dim * 2, 
-            out_channels=hidden_dim, 
-            kernel_size=3, 
-            padding=1
+        # Enhanced temporal convolutional layer for time-domain feature extraction
+        self.temporal_conv = nn.Sequential(
+            nn.Conv1d(hidden_dim * 2, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout)
         )
-        self.temporal_bn = nn.BatchNorm1d(hidden_dim)
         
-        # Multi-head output processing
-        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
+        # Multi-layer output processing with residual connections
+        self.output_layers = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+        )
         
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.fc_out = nn.Linear(hidden_dim // 2, output_dim)
+        # Main BP waveform prediction head
+        self.waveform_head = nn.Linear(hidden_dim // 2, output_dim)
         
-        # Additional prediction heads for systolic/diastolic
-        self.systolic_head = nn.Linear(hidden_dim // 2, 1)
-        self.diastolic_head = nn.Linear(hidden_dim // 2, 1)
+        # Auxiliary prediction heads for direct systolic/diastolic prediction
+        if self.use_auxiliary_heads:
+            self.systolic_head = nn.Linear(hidden_dim // 2, 1)
+            self.diastolic_head = nn.Linear(hidden_dim // 2, 1)
         
     def forward(self, x_seq, return_attention=False):
         """
-        x_seq: sequence of images [batch_size, seq_len, 1, 32, 32]
+        Sophisticated forward pass for BP waveform prediction
+        
+        Args:
+            x_seq: sequence of PVI images [batch_size, seq_len, 1, 32, 32]
+            return_attention: bool - whether to return attention weights for visualization
+            
+        Returns:
+            Dictionary containing:
+                - 'waveform': predicted BP waveform [batch_size, 50]
+                - 'systolic': predicted systolic values [batch_size, 1] (if auxiliary heads enabled)
+                - 'diastolic': predicted diastolic values [batch_size, 1] (if auxiliary heads enabled)
+                - 'attention_weights': attention patterns [batch_size, seq_len, seq_len] (if requested)
         """
         batch_size, seq_len = x_seq.shape[0], x_seq.shape[1]
         
-        # Encode each frame to get its latent representation
+        # Encode each frame using the frozen VAE - CRITICAL: No gradients computed
         latent_seq = []
-        for t in range(seq_len):
-            # Get current frame
-            x_t = x_seq[:, t]  # [batch_size, 1, 32, 32]
-            
-            # Encode the frame (without computing gradients for VAE)
-            with torch.no_grad():
+        with torch.no_grad():
+            for t in range(seq_len):
+                # Get current frame
+                x_t = x_seq[:, t]  # [batch_size, 1, 32, 32]
+                
+                # Encode the frame (VAE parameters are frozen)
                 mu_t, _ = self.vae.encode(x_t)
-            
-            # Store the latent representation (just the mean)
-            latent_seq.append(mu_t)
+                
+                # Store the latent representation (just the mean for stability)
+                latent_seq.append(mu_t)
         
         # Stack latent representations along the sequence dimension
         latent_seq = torch.stack(latent_seq, dim=1)  # [batch_size, seq_len, latent_dim]
         
-        # Project input features
+        # Enhanced input projection with layer normalization
         projected_seq = self.input_projection(latent_seq)  # [batch_size, seq_len, hidden_dim]
-        projected_seq = self.input_dropout(projected_seq)
         
-        # Process with bidirectional LSTM
+        # Process with bidirectional LSTM for temporal modeling
         lstm_out, _ = self.lstm(projected_seq)  # [batch_size, seq_len, 2*hidden_dim]
         
-        # Apply attention mechanism if enabled
+        # Apply multi-head self-attention if enabled
         attention_weights = None
         if self.use_attention:
             lstm_out, attention_weights = self.attention(lstm_out)
         
-        # Temporal convolution for time-domain processing
+        # Temporal convolution for time-domain feature extraction
         # Transpose for conv1d: [batch_size, channels, seq_len]
         conv_input = lstm_out.transpose(1, 2)  # [batch_size, 2*hidden_dim, seq_len]
         conv_out = self.temporal_conv(conv_input)  # [batch_size, hidden_dim, seq_len]
-        conv_out = self.temporal_bn(conv_out)
-        conv_out = F.relu(conv_out)
         
         # Global average pooling over time dimension
         pooled = torch.mean(conv_out, dim=2)  # [batch_size, hidden_dim]
         
-        # Process through fully connected layers
-        x = self.fc1(pooled)
-        x = self.relu(x)
-        x = self.dropout(x)
+        # Process through enhanced output layers
+        features = self.output_layers(pooled)  # [batch_size, hidden_dim // 2]
         
-        x = self.fc2(x)
-        x = self.relu(x)
+        # Generate main BP waveform prediction
+        bp_waveform = self.waveform_head(features)  # [batch_size, 50]
         
-        # Main BP waveform output
-        bp_waveform = self.fc_out(x)
-        
-        # Additional outputs for systolic and diastolic
-        systolic_pred = self.systolic_head(x)
-        diastolic_pred = self.diastolic_head(x)
-        
+        # Prepare output dictionary
         outputs = {
-            'waveform': bp_waveform,
-            'systolic': systolic_pred,
-            'diastolic': diastolic_pred
+            'waveform': bp_waveform
         }
         
+        # Add auxiliary predictions if enabled
+        if self.use_auxiliary_heads:
+            outputs['systolic'] = self.systolic_head(features)    # [batch_size, 1]
+            outputs['diastolic'] = self.diastolic_head(features)  # [batch_size, 1]
+        
+        # Include attention weights if requested (for visualization)
         if return_attention and attention_weights is not None:
             outputs['attention_weights'] = attention_weights
             
@@ -399,8 +489,10 @@ class VAEBiLSTMWithAttention(nn.Module):
 def extract_frame(batch_data, frame_idx=0):
     """Extract a specific frame from the batch data and normalize it to [0, 1]"""
     if isinstance(batch_data, dict):
-        # If batch is a dictionary (like in your debug output)
-        pvi_data = batch_data['pviHP']
+        # If batch is a dictionary, extract from nested structure
+        pvi_data = batch_data['pviHP']['img']  # [batch_size, 32, 32, 500]
+        # Add channel dimension: [batch_size, 32, 32, 500] -> [batch_size, 1, 32, 32, 500]
+        pvi_data = pvi_data.unsqueeze(1)
     else:
         # If batch is just the tensor
         pvi_data = batch_data
@@ -454,8 +546,12 @@ def prepare_sequence_data(batch_data, central_indices=None, pattern_offsets=None
     if not isinstance(batch_data, dict):
         raise ValueError("Expected batch_data to be a dictionary")
     
-    pvi_data = batch_data['pviHP']  # [batch_size, 1, 32, 32, 500]
-    bp_data = batch_data['bp']      # [batch_size, 50]
+    # Extract PVI image data and BP signal from the nested dictionaries
+    pvi_data = batch_data['pviHP']['img']  # [batch_size, 32, 32, 500]
+    bp_data = batch_data['bp']['signal']   # [batch_size, 50]
+    
+    # Add channel dimension to PVI data: [batch_size, 32, 32, 500] -> [batch_size, 1, 32, 32, 500]
+    pvi_data = pvi_data.unsqueeze(1)
     
     batch_size = pvi_data.shape[0]
     total_frames = pvi_data.shape[-1]
@@ -1209,9 +1305,68 @@ def visualize_attention_patterns(attention_weights_list, pattern_offsets, output
     })
 
 
+def load_config_file(config_path):
+    """Load YAML configuration file"""
+    with open(config_path, 'r') as file:
+        config = yaml.safe_load(file)
+    return config
+
+def apply_config_to_args(args, config):
+    """Apply config values to args, command line args take priority"""
+    # Data configuration
+    data_config = config.get('data_config', {})
+    if args.data_path == os.path.expanduser("~/phd/data/subject001_baseline_masked.h5") and 'data_file' in data_config:
+        args.data_path = os.path.join(data_config.get('root_path', ''), data_config['data_file'])
+    
+    # Model configuration
+    model_config = config.get('model_config', {})
+    vae_config = model_config.get('vae_config', {})
+    bilstm_config = model_config.get('bilstm_config', {})
+    attention_config = model_config.get('attention_config', {})
+    
+    if args.latent_dim == 256:  # Default value
+        args.latent_dim = vae_config.get('latent_dim', args.latent_dim)
+    if args.vae_checkpoint is None:
+        args.vae_checkpoint = vae_config.get('vae_checkpoint_path')
+    if args.lstm_hidden_dim == 256:  # Default value
+        args.lstm_hidden_dim = bilstm_config.get('hidden_dim', args.lstm_hidden_dim)
+    if args.lstm_layers == 3:  # Default value
+        args.lstm_layers = bilstm_config.get('num_layers', args.lstm_layers)
+    if not hasattr(args, 'use_attention_set'):  # Check if attention was set via CLI
+        args.use_attention = attention_config.get('use_attention', args.use_attention)
+    if args.attention_dim == 128:  # Default value
+        args.attention_dim = attention_config.get('attention_dim', args.attention_dim)
+    
+    # Training configuration
+    training_config = config.get('training_config', {})
+    if args.num_epochs == 25:  # Default value
+        args.num_epochs = training_config.get('num_epochs', args.num_epochs)
+    if args.batch_size == 8:  # Default value
+        args.batch_size = training_config.get('batch_size', args.batch_size)
+    
+    # Loss configuration
+    loss_config = config.get('loss_config', {})
+    if args.loss_type == 'composite':  # Default value
+        args.loss_type = loss_config.get('loss_type', args.loss_type)
+    
+    # Output configuration
+    output_config = config.get('output_config', {})
+    if args.output_dir == 'enhanced_vae_bilstm_output':  # Default value
+        args.output_dir = output_config.get('output_dir', args.output_dir)
+    
+    # Logging configuration
+    logging_config = config.get('logging_config', {})
+    visualization = logging_config.get('visualization', {})
+    if not args.visualize_attention:  # Default is False
+        args.visualize_attention = visualization.get('visualize_attention', args.visualize_attention)
+    
+    return args
+
 def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Train and evaluate Enhanced VAE-BiLSTM for BP prediction')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to YAML configuration file')
     parser.add_argument('--output_dir', type=str, default='enhanced_vae_bilstm_output',
                         help='Directory for saving output files')
     parser.add_argument('--data_path', type=str, 
@@ -1247,6 +1402,15 @@ def main():
                         help='Weights & Biases mode')
     
     args = parser.parse_args()
+    
+    # Load config file if provided
+    if args.config:
+        print(f"Loading configuration from: {args.config}")
+        config = load_config_file(args.config)
+        args = apply_config_to_args(args, config)
+        print(f"Configuration applied: {args.config}")
+    else:
+        print("No config file provided, using command line arguments and defaults")
     
     # 10-frame pattern from k-7 to k+2
     pattern_offsets = [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]
@@ -1326,11 +1490,25 @@ def main():
     print(f"Dataset loaded with {len(dataset)} samples")
     wandb.config.update({"dataset_size": len(dataset)})
     
-    # Create batch server
-    batch_server = PviBatchServer(dataset, input_type="img", output_type="full")
+    # Create custom data loader that preserves original data structure
+    # Split dataset into train/test
+    train_size = int(0.7 * len(dataset))
+    val_size = int(0.15 * len(dataset))
+    test_size = len(dataset) - train_size - val_size
     
-    # Set batch size using the correct method
-    batch_server.set_loader_params(batch_size=args.batch_size, test_size=0.3)  # Use 30% for test+val
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size, test_size]
+    )
+    
+    print(f"Dataset split: Train={len(train_dataset)}, Val={len(val_dataset)}, Test={len(test_dataset)}")
+    
+    # Create data loaders that preserve original structure
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, 
+                             num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, 
+                           num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, 
+                            num_workers=2, pin_memory=True)
     
     # Load the pretrained VAE
     print(f"Loading pretrained VAE from: {vae_checkpoint_path}")
@@ -1338,7 +1516,14 @@ def main():
     
     try:
         checkpoint = torch.load(vae_checkpoint_path, map_location=device)
-        vae_model.load_state_dict(checkpoint['model_state_dict'])
+        # Handle different checkpoint formats
+        if 'model_state_dict' in checkpoint:
+            vae_model.load_state_dict(checkpoint['model_state_dict'])
+        elif 'state_dict' in checkpoint:
+            vae_model.load_state_dict(checkpoint['state_dict'])
+        else:
+            # Assume the checkpoint is the state dict itself
+            vae_model.load_state_dict(checkpoint)
         print(f"VAE loaded successfully from epoch {checkpoint.get('epoch', 'unknown')}")
     except Exception as e:
         print(f"Error loading VAE: {e}")
@@ -1347,14 +1532,9 @@ def main():
     # Set VAE to evaluation mode
     vae_model.eval()
     
-    # Get loaders
-    train_loader, test_val_loader = batch_server.get_loaders()
-    
-    # Split test_val_loader into validation and test sets
-    test_val_batches = list(test_val_loader)
-    val_size = len(test_val_batches) // 3  # 1/3 of test_val for validation, 2/3 for testing
-    val_batches = test_val_batches[:val_size]
-    test_batches = test_val_batches[val_size:]
+    # Convert validation loader to list for the training function
+    val_batches = list(val_loader)
+    test_batches = list(test_loader)
     
     print(f"Train batches: {len(train_loader)}, Validation batches: {len(val_batches)}, Test batches: {len(test_batches)}")
     

@@ -1,0 +1,196 @@
+# Production Configuration for Sophisticated BP Predictor
+# Optimized settings for high-quality training results
+
+environment:
+  data_root: "/home/lucas_takanori/phd/data"
+  experiments_root: "./experiments"
+
+data_config:
+  root_path: "/home/lucas_takanori/phd/data"
+  data_file: "subject001_baseline_masked.h5"
+  
+  # Advanced sequence parameters
+  pattern_offsets: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]  # Full cardiac cycle
+  sequence_length: 10
+  
+  # Data splits
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  
+  # Normalization
+  bp_normalization: [40.0, 200.0]
+  frame_normalization: "minmax"
+
+model_config:
+  model_type: "sophisticated_bp_predictor"
+  
+  # VAE Configuration (Pre-trained)
+  vae_config:
+    latent_dim: 128  # Optimal feature dimension
+    freeze_vae: true
+    vae_checkpoint_path: "/home/lucas_takanori/phd/bp_prediction/experiments/experiment_20250617_145515/checkpoints/vae_best.pt"
+  
+  # Enhanced BiLSTM Configuration
+  bilstm_config:
+    input_dim: 128
+    hidden_dim: 256     # Large capacity for complex patterns
+    num_layers: 3       # Deep architecture
+    output_dim: 50
+    bidirectional: true
+    dropout_rate: 0.3
+    
+  # Multi-Head Self-Attention Configuration
+  attention_config:
+    use_attention: true
+    attention_type: "multi_head_self_attention"
+    attention_dim: 128
+    num_attention_heads: 8  # Full multi-head attention
+    attention_dropout: 0.1
+    
+  # Auxiliary Prediction Heads
+  auxiliary_heads:
+    use_auxiliary_heads: true
+    systolic_head: true
+    diastolic_head: true
+    
+  # Advanced Features
+  advanced_features:
+    use_residual_connections: true
+    use_layer_norm: true
+
+training_config:
+  # Optimal training parameters
+  num_epochs: 50      # Sufficient for convergence
+  batch_size: 16      # Balanced batch size
+  learning_rate: 1e-3 # Good starting point
+  optimizer: "adam"
+  weight_decay: 1e-5
+  
+  # Advanced optimizer settings
+  optimizer_config:
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    amsgrad: false
+    
+  # Learning rate scheduler
+  scheduler_config:
+    use_scheduler: true
+    scheduler_type: "cosine"
+    T_max: 50
+    eta_min: 1e-6
+    
+  # Optimization
+  optimization:
+    use_mixed_precision: false
+    grad_clip_norm: 1.0
+    accumulate_grad_batches: 1
+    
+  # Early stopping
+  early_stopping:
+    patience: 15
+    min_delta: 1e-4
+    monitor: "val_loss"
+    mode: "min"
+    
+  # Checkpointing
+  checkpointing:
+    save_every_n_epochs: 5
+    save_best_only: false
+    save_last: true
+    monitor: "val_loss"
+
+loss_config:
+  # Composite loss for comprehensive training
+  loss_type: "composite"
+  
+  # Balanced loss weights
+  loss_weights:
+    waveform_weight: 0.6    # Primary focus on waveform shape
+    systolic_weight: 0.2    # Clinical systolic accuracy
+    diastolic_weight: 0.2   # Clinical diastolic accuracy
+    
+  # BP extraction configuration
+  bp_extraction:
+    systolic_method: "max"
+    diastolic_method: "min_after_systolic"
+    
+  # Normalization
+  normalize_for_loss: true
+  bp_norm_range: [40.0, 200.0]
+
+logging_config:
+  # Comprehensive logging
+  level: "INFO"
+  log_every_n_steps: 50
+  
+  # Weights & Biases
+  wandb:
+    use_wandb: true
+    project: "sophisticated-bp-prediction"
+    mode: "offline"
+    tags: ["production", "sophisticated", "bilstm", "attention", "vae"]
+    group: "sophisticated_bp_predictor"
+    
+  # Visualization
+  visualization:
+    visualize_attention: true
+    plot_predictions: true
+    save_prediction_plots: true
+    plot_every_n_epochs: 5
+    num_examples_to_plot: 5
+
+evaluation_config:
+  # Complete evaluation metrics
+  metrics:
+    - "mse"
+    - "mae"
+    - "r2"
+    - "systolic_mae"
+    - "diastolic_mae"
+    - "systolic_error"
+    - "diastolic_error"
+    
+  # Clinical evaluation
+  clinical_metrics:
+    compute_bland_altman: true
+    compute_correlation: true
+    compute_agreement_metrics: true
+
+# Hardware optimization
+hardware_config:
+  device: "auto"
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  
+  memory_optimization:
+    empty_cache_every_n_steps: 100
+    max_memory_usage: 0.9
+
+# Output configuration
+output_config:
+  output_dir: "./experiments/sophisticated_bp_predictor_production"
+  experiment_name: "sophisticated_bp_predictor_production_v1"
+  
+  save_results:
+    save_predictions: true
+    save_attention_weights: true
+    save_model_summary: true
+    save_config: true
+
+# Experiment metadata
+experiment_info:
+  name: "sophisticated_bp_predictor_production"
+  description: |
+    Production-grade sophisticated BP predictor with optimized hyperparameters.
+    Features pre-trained VAE encoder, enhanced BiLSTM with multi-head self-attention,
+    10-frame sliding window, and composite loss function for medical-grade accuracy.
+  version: "1.0.0"
+  author: "Sophisticated BP Prediction System"
+
+# Advanced configuration
+advanced_config:
+  seed: 42
+  deterministic: true
+  benchmark: false 

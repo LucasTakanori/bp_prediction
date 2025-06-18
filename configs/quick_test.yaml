@@ -1,0 +1,87 @@
+# Quick Test Configuration for Sophisticated BP Predictor
+# Minimal settings for fast testing and debugging
+
+environment:
+  data_root: "/home/lucas_takanori/phd/data"
+  experiments_root: "./experiments"
+
+data_config:
+  root_path: "/home/lucas_takanori/phd/data"
+  data_file: "subject001_baseline_masked.h5"
+  pattern_offsets: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]
+  bp_normalization: [40.0, 200.0]
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+
+model_config:
+  vae_config:
+    latent_dim: 64  # Smaller for faster testing
+    freeze_vae: true
+    vae_checkpoint_path: "/home/lucas_takanori/phd/bp_prediction/experiments/experiment_20250617_145515/checkpoints/vae_best.pt"
+  
+  bilstm_config:
+    input_dim: 64
+    hidden_dim: 128  # Smaller for faster testing
+    num_layers: 2    # Fewer layers for speed
+    output_dim: 50
+    dropout_rate: 0.3
+    
+  attention_config:
+    use_attention: true
+    attention_dim: 64  # Smaller attention
+    num_attention_heads: 4  # Fewer heads
+    
+  auxiliary_heads:
+    use_auxiliary_heads: true
+
+training_config:
+  num_epochs: 5      # Very few epochs for quick testing
+  batch_size: 4      # Small batch size
+  learning_rate: 1e-3
+  optimizer: "adam"
+  
+  scheduler_config:
+    use_scheduler: true
+    scheduler_type: "cosine"
+    T_max: 5
+    
+  optimization:
+    grad_clip_norm: 1.0
+    
+  early_stopping:
+    patience: 10
+    
+  checkpointing:
+    save_every_n_epochs: 2
+
+loss_config:
+  loss_type: "composite"
+  loss_weights:
+    waveform_weight: 0.6
+    systolic_weight: 0.2
+    diastolic_weight: 0.2
+  bp_norm_range: [40.0, 200.0]
+
+logging_config:
+  wandb:
+    use_wandb: true
+    mode: "offline"
+    project: "bp-prediction-test"
+    tags: ["quick_test", "debug"]
+    
+  visualization:
+    visualize_attention: true
+    plot_predictions: true
+
+output_config:
+  output_dir: "./experiments/quick_test"
+  experiment_name: "quick_test"
+
+hardware_config:
+  device: "auto"
+  num_workers: 2  # Fewer workers for testing
+
+experiment_info:
+  name: "quick_test"
+  description: "Quick test configuration for rapid prototyping and debugging" 

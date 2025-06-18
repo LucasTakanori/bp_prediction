@@ -1,0 +1,41 @@
+# Simple Sophisticated BP Predictor Configuration
+# Usage: python scripts/train_sophisticated_bp_predictor.py --config configs/sophisticated_quick.yaml
+
+data_config:
+  root_path: /home/lucas_takanori/phd/data
+  data_file: subject001_baseline_masked.h5
+  pattern_offsets: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]  # 10-frame sliding window
+
+model_config:
+  vae_config:
+    vae_checkpoint_path: /home/lucas_takanori/phd/bp_prediction/experiments/experiment_20250617_145515/checkpoints/vae_best.pt
+    latent_dim: 64
+  
+  bilstm_config:
+    hidden_dim: 256
+    num_layers: 3
+    dropout: 0.3
+  
+  attention_config:
+    num_attention_heads: 8
+    use_attention: true
+
+training_config:
+  num_epochs: 15  # Quick test
+  batch_size: 8
+  learning_rate: 0.0001
+  
+loss_config:
+  loss_type: composite
+
+output_config:
+  output_dir: ./sophisticated_bp_experiments
+  
+logging_config:
+  use_wandb: false
+  visualization:
+    visualize_attention: true
+
+normalization:
+  bp_min: 40.0
+  bp_max: 200.0 
