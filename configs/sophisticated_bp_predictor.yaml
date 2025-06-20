@@ -21,8 +21,8 @@ data_config:
   return_metadata: true
   
   # Advanced sequence parameters for sophisticated model
-  pattern_offsets: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]  # 10-frame sliding window
-  sequence_length: 10  # Matches pattern_offsets length
+  pattern_offsets: [0]  # Single frame only (t=0)
+  sequence_length: 1  # Single frame
   
   # Data splits
   train_split: 0.7
@@ -57,11 +57,12 @@ model_config:
     
   # Multi-Head Self-Attention Configuration
   attention_config:
-    use_attention: true
+    use_attention: false  # Disabled for single frame
     attention_type: "multi_head_self_attention"  # or "temporal_attention"
     attention_dim: 128
     num_attention_heads: 8
     attention_dropout: 0.1
+    current_frame_bias: 2.0  # Bias to encourage attention on current frame (t=0)
     
   # Auxiliary Prediction Heads
   auxiliary_heads:
@@ -207,8 +208,8 @@ hardware_config:
 # Output configuration
 output_config:
   # Directory structure
-  output_dir: "./experiments/sophisticated_bp_predictor"
-  experiment_name: "sophisticated_bp_predictor_v1"
+  output_dir: "./experiments/single_frames"
+  experiment_name: "single_frame_bp_predictor"
   
   # Results saving
   save_results:
@@ -224,18 +225,18 @@ output_config:
 
 # Experiment metadata
 experiment_info:
-  name: "sophisticated_bp_predictor"
+  name: "single_frame_bp_predictor"
   description: |
-    Advanced deep learning system for continuous blood pressure prediction from 
-    photoplethysmography volume intensity (PVI) image sequences. Features:
-    - Pre-trained VAE encoder (frozen) for feature extraction
-    - Enhanced BiLSTM with multi-head self-attention
-    - 10-frame sliding window temporal pattern
+    Single-frame blood pressure prediction system using only the current frame (t=0).
+    Features:
+    - Pre-trained VAE encoder (frozen) for feature extraction from single PVI frame
+    - Enhanced BiLSTM (without temporal sequence, acts as feature processor)
+    - Direct frame-to-BP prediction without temporal dependencies
     - Physiologically-informed systolic/diastolic extraction
     - Composite loss function with multiple components
     - Medical-grade evaluation metrics
   version: "1.0.0"
-  author: "Sophisticated BP Prediction System"
+  author: "Single Frame BP Prediction System"
   created_date: "2025-01-17"
   
 # Advanced configuration

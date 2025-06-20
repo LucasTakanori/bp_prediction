@@ -19,6 +19,16 @@ experiments/
 cache/
 test_bilstm_output/
 test_vae_output/
+bp_analysis_results/
+dataset_analysis_results/
+evaluation_results/
+multi_signal_analysis/
+signal_analysis/
+signal_plots/
+sophisticated_bilstm/
+test_sophisticated_bilstm/
+sophisticated_bp_experiments/
+enhanced_vae_bilstm_outputs/
 
 # C extensions
 *.so

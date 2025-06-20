@@ -40,42 +40,55 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
 # Import utilities
-from utils.data_utils import PviDataset, PviBatchServer
+from utils.data_utils import PviDataset, PviBatchServer, DataPathManager
 
 
 class SophisticatedBPDataset(Dataset):
-    """Simple dataset for sophisticated BP prediction with sliding window sequences"""
+    """Dataset for sophisticated BP prediction using sliding window sequences"""
     
     def __init__(self, data_root: str, pattern_offsets: List[int], 
-                 bp_normalization: Tuple[float, float] = (40.0, 200.0),
-                 max_samples_per_batch: int = 50):
+                 max_samples_per_subject: int = 50):
         self.data_root = data_root
         self.pattern_offsets = pattern_offsets
-        self.bp_min, self.bp_max = bp_normalization
-        self.max_samples_per_batch = max_samples_per_batch
+        self.max_samples_per_subject = max_samples_per_subject
         
-        # Load data directly from HDF5
-        print(f"Loading data from: {data_root}")
-        import h5py
+        print(f"Loading data using PviDataset from: {data_root}")
+        
+        # Load data using the standard PviDataset
+        self.pvi_dataset = PviDataset(data_root)
         
         self.sequences = []
         self.targets = []
         
-        with h5py.File(data_root, 'r') as f:
-            # Load PVI data and BP data
-            pvi_data = f['data']['pviHP']['img'][:]  # [batch, 32, 32, num_frames]
-            bp_data = f['data']['bp']['signal'][:]   # [batch, num_frames]
+        print(f"Loaded {len(self.pvi_dataset)} samples from PviDataset")
+        
+        # Debug: Print first sample structure
+        if len(self.pvi_dataset) > 0:
+            first_sample = self.pvi_dataset[0]
+            print("First sample structure:")
+            for key in first_sample.keys():
+                if isinstance(first_sample[key], dict):
+                    print(f"  {key}:")
+                    for subkey in first_sample[key].keys():
+                        if hasattr(first_sample[key][subkey], 'shape'):
+                            print(f"    {subkey}: {first_sample[key][subkey].shape}")
+                        else:
+                            print(f"    {subkey}: {type(first_sample[key][subkey])}")
+                else:
+                    print(f"  {key}: {type(first_sample[key])}")
+        
+        # Process each sample from the dataset
+        for sample_idx in range(min(len(self.pvi_dataset), self.max_samples_per_subject)):
+            sample = self.pvi_dataset[sample_idx]
             
-            print(f"PVI data shape: {pvi_data.shape}")
-            print(f"BP data shape: {bp_data.shape}")
+            # Extract PVI images and BP signal
+            pvi_img = sample['pviHP']['img']  # [32, 32, num_frames]
+            bp_signal = sample['bp']['signal']  # [num_frames] - each frame is 50 samples (1 second)
             
-            # Process sequences
-            batch_size = pvi_data.shape[0]
-            num_frames = pvi_data.shape[-1]
+            print(f"Sample {sample_idx}: PVI shape {pvi_img.shape}, BP shape {bp_signal.shape}")
             
-            # Sample BP to 50 points to match expected output
-            bp_data = bp_data[:, ::num_frames//50][:, :50]  # Sample down to 50 points
-            print(f"Sampled BP shape: {bp_data.shape}")
+            # Get number of frames
+            num_frames = pvi_img.shape[-1]
             
             # Determine valid central indices for sliding window
             min_offset = min(self.pattern_offsets)
@@ -83,43 +96,76 @@ class SophisticatedBPDataset(Dataset):
             valid_start = max(0, -min_offset)
             valid_end = min(num_frames, num_frames - max_offset)
             
-            # Sample central indices (every 10 frames to avoid overlap)
-            central_indices = list(range(valid_start, valid_end, 10))[:self.max_samples_per_batch]
+            # Sample central indices (every 5 frames to avoid too much overlap)
+            step_size = max(1, len(self.pattern_offsets) // 2)
+            central_indices = list(range(valid_start, valid_end, step_size))
             
-            print(f"Creating sequences for {len(central_indices)} central indices per batch")
+            print(f"Sample {sample_idx}: Creating sequences for {len(central_indices)} central indices")
             
-            for b in range(min(batch_size, 10)):  # Limit to first 10 batches for quick test
-                for central_idx in central_indices:
-                    # Create sequence using pattern offsets
-                    seq_frames = []
-                    valid_sequence = True
+            for central_idx in central_indices:
+                # Create sequence using pattern offsets
+                seq_frames = []
+                valid_sequence = True
+                
+                for offset in self.pattern_offsets:
+                    frame_idx = central_idx + offset
+                    if 0 <= frame_idx < num_frames:
+                        # Extract and normalize frame - match VAE training approach
+                        frame = pvi_img[:, :, frame_idx]  # [32, 32]
+                        frame = torch.tensor(frame, dtype=torch.float32)
+                        frame = torch.nan_to_num(frame, nan=0.0)  # Only handle NaN like VAE training
+                        
+                        # Add channel dimension for VAE input: [1, 32, 32]
+                        frame = frame.unsqueeze(0)
+                        seq_frames.append(frame)
+                    else:
+                        valid_sequence = False
+                        break
+                
+                if valid_sequence:
+                    sequence = torch.stack(seq_frames)  # [seq_len, 1, 32, 32]
                     
-                    for offset in self.pattern_offsets:
-                        frame_idx = central_idx + offset
-                        if 0 <= frame_idx < num_frames:
-                            # Extract and normalize frame
-                            frame = pvi_data[b, :, :, frame_idx]  # [32, 32]
-                            frame = torch.tensor(frame, dtype=torch.float32)
-                            frame = torch.nan_to_num(frame, nan=0.0)
-                            frame = torch.clamp(frame, 0, 1)  # Normalize to [0, 1]
-                            frame = (frame - 0.5) / 0.5  # Normalize to [-1, 1] for VAE
-                            frame = frame.unsqueeze(0)  # Add channel dim: [1, 32, 32]
-                            seq_frames.append(frame)
+                    # Use the BP signal for the CURRENT FRAME (central_idx) as target
+                    # This corresponds to the frame at offset=0 in our pattern
+                    if bp_signal.dim() == 1:
+                        # If BP signal is 1D, it's already the signal for this central frame
+                        target_bp = bp_signal
+                    else:
+                        # If BP signal is 2D [num_frames, signal_length], select the current frame
+                        target_bp = bp_signal[central_idx] if central_idx < bp_signal.shape[0] else bp_signal[0]
+                    
+                    # If BP signal has multiple dimensions, we might need to slice
+                    if target_bp.dim() > 1:
+                        print(f"Warning: BP signal has shape {target_bp.shape}, using first dimension")
+                        target_bp = target_bp[0] if target_bp.shape[0] == 1 else target_bp.flatten()
+                    
+                    # Ensure target is exactly 50 samples
+                    current_length = target_bp.shape[0]
+                    if current_length != 50:
+                        print(f"Resampling BP signal from {current_length} to 50 samples")
+                        if current_length > 50:
+                            # Downsample by taking evenly spaced samples
+                            indices = torch.linspace(0, current_length - 1, 50).long()
+                            target_bp = target_bp[indices]
                         else:
-                            valid_sequence = False
-                            break
+                            # Upsample using interpolation
+                            target_bp = torch.nn.functional.interpolate(
+                                target_bp.unsqueeze(0).unsqueeze(0), 
+                                size=50, 
+                                mode='linear', 
+                                align_corners=False
+                            ).squeeze()
                     
-                    if valid_sequence:
-                        sequence = torch.stack(seq_frames)  # [seq_len, 1, 32, 32]
-                        target = torch.tensor(bp_data[b], dtype=torch.float32)  # [50]
-                        
-                        # Normalize BP target
-                        target_norm = (target - self.bp_min) / (self.bp_max - self.bp_min)
-                        
-                        self.sequences.append(sequence)
-                        self.targets.append(target_norm)
+                    # Keep BP signal in raw mmHg values (no normalization like data_utils.py)
+                    target_bp = target_bp.float()
+                    
+                    self.sequences.append(sequence)
+                    self.targets.append(target_bp)  # BP signal for current frame (t)
         
         print(f"Created {len(self.sequences)} sequences from sliding windows")
+        if len(self.sequences) > 0:
+            print(f"Sequence shape: {self.sequences[0].shape}")
+            print(f"Target shape: {self.targets[0].shape}")
     
     def __len__(self):
         return len(self.sequences)
@@ -215,13 +261,15 @@ class VAE(nn.Module):
 class MultiHeadSelfAttention(nn.Module):
     """Multi-head self-attention for temporal modeling"""
     
-    def __init__(self, hidden_dim: int, num_heads: int = 8, dropout: float = 0.1):
+    def __init__(self, hidden_dim: int, num_heads: int = 8, dropout: float = 0.1, 
+                 current_frame_bias: float = 2.0):
         super(MultiHeadSelfAttention, self).__init__()
         assert hidden_dim % num_heads == 0
         
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
+        self.current_frame_bias = current_frame_bias
         
         self.query = nn.Linear(hidden_dim, hidden_dim)
         self.key = nn.Linear(hidden_dim, hidden_dim)
@@ -231,7 +279,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.layer_norm = nn.LayerNorm(hidden_dim)
         self.output_proj = nn.Linear(hidden_dim, hidden_dim)
     
-    def forward(self, x):
+    def forward(self, x, pattern_offsets=None):
         batch_size, seq_len, hidden_dim = x.shape
         
         Q = self.query(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -239,6 +287,26 @@ class MultiHeadSelfAttention(nn.Module):
         V = self.value(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         
         scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.head_dim)
+        
+        # Add positional bias to encourage attention on current frame (t=0)
+        if pattern_offsets is not None and self.current_frame_bias > 0:
+            # Find the index of the current frame (offset=0)
+            try:
+                current_frame_idx = pattern_offsets.index(0)
+                
+                # Create bias matrix - boost attention TO the current frame
+                bias_matrix = torch.zeros_like(scores[0, 0])  # [seq_len, seq_len]
+                bias_matrix[:, current_frame_idx] += self.current_frame_bias  # Boost attention TO current frame
+                bias_matrix[current_frame_idx, :] += self.current_frame_bias * 0.5  # Boost attention FROM current frame
+                
+                # Apply bias to all heads and batches
+                bias_matrix = bias_matrix.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+                scores = scores + bias_matrix.to(scores.device)
+                
+            except ValueError:
+                # Current frame (offset=0) not in pattern_offsets, skip bias
+                pass
+        
         attention_weights = torch.softmax(scores, dim=-1)
         attention_weights = self.dropout(attention_weights)
         
@@ -254,11 +322,13 @@ class SophisticatedBPPredictor(nn.Module):
     
     def __init__(self, vae_model: VAE, latent_dim: int = 64, 
                  hidden_dim: int = 256, num_layers: int = 3, num_heads: int = 8,
-                 dropout: float = 0.3, use_attention: bool = True):
+                 dropout: float = 0.3, use_attention: bool = True, 
+                 pattern_offsets: List[int] = None, current_frame_bias: float = 2.0):
         super(SophisticatedBPPredictor, self).__init__()
         
         self.vae = vae_model
         self.use_attention = use_attention
+        self.pattern_offsets = pattern_offsets or [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]
         
         # Freeze VAE parameters
         for param in self.vae.parameters():
@@ -272,35 +342,50 @@ class SophisticatedBPPredictor(nn.Module):
             nn.Dropout(dropout * 0.5)
         )
         
-        # Bidirectional LSTM
-        self.lstm = nn.LSTM(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0,
-            bidirectional=True
-        )
+        # Bidirectional LSTM (optional for single frame)
+        self.use_temporal_processing = len(self.pattern_offsets) > 1
         
-        # Self-attention
-        if use_attention:
-            self.attention = MultiHeadSelfAttention(
-                hidden_dim=hidden_dim * 2,
-                num_heads=num_heads,
-                dropout=dropout
+        if self.use_temporal_processing:
+            self.lstm = nn.LSTM(
+                input_size=hidden_dim,
+                hidden_size=hidden_dim,
+                num_layers=num_layers,
+                batch_first=True,
+                dropout=dropout if num_layers > 1 else 0,
+                bidirectional=True
             )
+            lstm_output_dim = hidden_dim * 2
+        else:
+            self.lstm = None
+            lstm_output_dim = hidden_dim
         
-        # Temporal convolution
-        self.temporal_conv = nn.Sequential(
-            nn.Conv1d(hidden_dim * 2, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout)
-        )
+        # Self-attention (only for multi-frame)
+        if use_attention and self.use_temporal_processing:
+            self.attention = MultiHeadSelfAttention(
+                hidden_dim=lstm_output_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                current_frame_bias=current_frame_bias
+            )
+        else:
+            self.attention = None
+        
+        # Temporal convolution (only for multi-frame)
+        if self.use_temporal_processing:
+            self.temporal_conv = nn.Sequential(
+                nn.Conv1d(lstm_output_dim, 128, kernel_size=3, padding=1),
+                nn.BatchNorm1d(128),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout)
+            )
+            final_feature_dim = 128
+        else:
+            self.temporal_conv = None
+            final_feature_dim = hidden_dim
         
         # Output layers
         self.output_layers = nn.Sequential(
-            nn.Linear(128, hidden_dim),
+            nn.Linear(final_feature_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -322,32 +407,39 @@ class SophisticatedBPPredictor(nn.Module):
                 mu_t, _ = self.vae.encode(x_seq[:, t])
                 latent_seq.append(mu_t)
         
-        latent_seq = torch.stack(latent_seq, dim=1)
+        latent_seq = torch.stack(latent_seq, dim=1)  # [batch_size, seq_len, latent_dim]
         
         # Project and process with LSTM
         projected_seq = self.input_projection(latent_seq)
-        lstm_out, _ = self.lstm(projected_seq)
         
-        # Apply attention
-        attention_weights = None
-        if self.use_attention:
-            lstm_out, attention_weights = self.attention(lstm_out)
-        
-        # Temporal convolution and aggregation
-        conv_input = lstm_out.transpose(1, 2)
-        conv_out = self.temporal_conv(conv_input)
-        pooled = torch.mean(conv_out, dim=2)
+        # Handle single frame case differently
+        if not self.use_temporal_processing:
+            # For single frame, skip LSTM and attention, use direct processing
+            features = projected_seq.squeeze(1)  # Remove sequence dimension [batch_size, hidden_dim]
+        else:
+            # Multi-frame processing with LSTM and attention
+            lstm_out, _ = self.lstm(projected_seq)
+            
+            # Apply attention
+            attention_weights = None
+            if self.attention is not None:
+                lstm_out, attention_weights = self.attention(lstm_out, self.pattern_offsets)
+            
+            # Temporal convolution and aggregation
+            conv_input = lstm_out.transpose(1, 2)
+            conv_out = self.temporal_conv(conv_input)
+            features = torch.mean(conv_out, dim=2)
         
         # Generate predictions
-        features = self.output_layers(pooled)
+        final_features = self.output_layers(features)
         
         outputs = {
-            'waveform': self.waveform_head(features),
-            'systolic': self.systolic_head(features),
-            'diastolic': self.diastolic_head(features)
+            'waveform': self.waveform_head(final_features),
+            'systolic': self.systolic_head(final_features),
+            'diastolic': self.diastolic_head(final_features)
         }
         
-        if return_attention and attention_weights is not None:
+        if return_attention and self.use_temporal_processing and self.attention is not None:
             outputs['attention_weights'] = attention_weights
         
         return outputs
@@ -460,8 +552,8 @@ def create_visualizations(predictions, targets, attention_weights, output_dir, p
     plt.savefig(os.path.join(output_dir, 'prediction_examples.png'), dpi=300, bbox_inches='tight')
     plt.close()
     
-    # Attention heatmap
-    if attention_weights is not None and len(attention_weights) > 0:
+    # Attention heatmap (only for multi-frame)
+    if attention_weights is not None and len(attention_weights) > 0 and len(pattern_offsets) > 1:
         plt.figure(figsize=(10, 8))
         avg_attention = np.mean(attention_weights[:5], axis=0)
         frame_labels = [f't{offset:+d}' if offset != 0 else 't' for offset in pattern_offsets]
@@ -473,6 +565,8 @@ def create_visualizations(predictions, targets, attention_weights, output_dir, p
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'attention_heatmap.png'), dpi=300, bbox_inches='tight')
         plt.close()
+    else:
+        print("Skipping attention visualization (single frame or no attention weights)")
 
 
 def load_config_file(config_path):
@@ -507,6 +601,8 @@ def apply_config_to_args(args, config):
         args.num_layers = bilstm_config.get('num_layers', args.num_layers)
     if args.num_attention_heads == 8:  # Default value
         args.num_attention_heads = attention_config.get('num_attention_heads', args.num_attention_heads)
+    if not hasattr(args, 'current_frame_bias') or args.current_frame_bias == 2.0:  # Default value
+        args.current_frame_bias = attention_config.get('current_frame_bias', 2.0)
     
     # Training configuration
     training_config = config.get('training_config', {})
@@ -581,6 +677,8 @@ def main():
                        help='Use self-attention mechanism')
     parser.add_argument('--visualize_attention', action='store_true', default=True,
                        help='Visualize attention patterns')
+    parser.add_argument('--current_frame_bias', type=float, default=2.0,
+                       help='Bias to encourage attention on current frame (t=0)')
     
     # Output and experiment tracking
     parser.add_argument('--output_dir', type=str, default='./sophisticated_bp_experiments',
@@ -597,12 +695,6 @@ def main():
     parser.add_argument('--pattern_offsets', type=int, nargs='+', 
                        default=[-7, -6, -5, -4, -3, -2, -1, 0, 1, 2],
                        help='Frame offsets for sliding window pattern')
-    
-    # BP normalization
-    parser.add_argument('--bp_min', type=float, default=40.0,
-                       help='Minimum BP value for normalization')
-    parser.add_argument('--bp_max', type=float, default=200.0,
-                       help='Maximum BP value for normalization')
     
     args = parser.parse_args()
     
@@ -677,8 +769,7 @@ def main():
     dataset = SophisticatedBPDataset(
         data_root=args.data_root,
         pattern_offsets=args.pattern_offsets,
-        bp_normalization=(args.bp_min, args.bp_max),
-        max_samples_per_batch=20
+        max_samples_per_subject=20
     )
     
     # Split dataset
@@ -715,7 +806,9 @@ def main():
         num_layers=args.num_layers,
         num_heads=args.num_attention_heads,
         dropout=args.dropout,
-        use_attention=args.use_attention
+        use_attention=args.use_attention,
+        pattern_offsets=args.pattern_offsets,
+        current_frame_bias=args.current_frame_bias
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
@@ -804,12 +897,12 @@ def main():
                     val_loss += loss_dict['total_loss'].item()
                     num_val_batches += 1
                     
-                    # Denormalize for metrics
-                    pred_denorm = outputs['waveform'].cpu() * (args.bp_max - args.bp_min) + args.bp_min
-                    target_denorm = targets.cpu() * (args.bp_max - args.bp_min) + args.bp_min
+                    # Store raw BP values for metrics (no denormalization needed)
+                    pred_raw = outputs['waveform'].cpu()
+                    target_raw = targets.cpu()
                     
-                    val_predictions.append(pred_denorm.numpy())
-                    val_targets.append(target_denorm.numpy())
+                    val_predictions.append(pred_raw.numpy())
+                    val_targets.append(target_raw.numpy())
                     
                     if args.visualize_attention and 'attention_weights' in outputs:
                         val_attention_weights.append(outputs['attention_weights'].cpu().numpy())
