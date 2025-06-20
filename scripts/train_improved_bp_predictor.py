@@ -250,53 +250,89 @@ class ImprovedBPPredictor(nn.Module):
         # Prediction heads with improved initialization
         self.waveform_head = nn.Linear(hidden_dim // 4, 50)
         
-        # FIXED: Enhanced SBP/DBP heads with wider bottleneck and better architecture
-        bp_feature_dim = hidden_dim // 3  # WIDER bottleneck for better diversity
-        
-        # Separate feature extractors for SBP and DBP to encourage diversity
-        self.systolic_feature_extractor = nn.Sequential(
-            nn.Linear(hidden_dim // 4, bp_feature_dim),
+        # Enhanced SBP/DBP heads with residual connections
+        self.bp_feature_extractor = nn.Sequential(
+            nn.Linear(hidden_dim // 4, hidden_dim // 8),
             nn.ReLU(inplace=True),
-            nn.Dropout(dropout * 0.2),
-            nn.Linear(bp_feature_dim, bp_feature_dim // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout * 0.1)
+            nn.Dropout(dropout * 0.3)
         )
         
-        self.diastolic_feature_extractor = nn.Sequential(
-            nn.Linear(hidden_dim // 4, bp_feature_dim),
+        self.systolic_head = nn.Sequential(
+            nn.Linear(hidden_dim // 8, 16),
             nn.ReLU(inplace=True),
-            nn.Dropout(dropout * 0.2),
-            nn.Linear(bp_feature_dim, bp_feature_dim // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout * 0.1)
+            nn.Linear(16, 1)
         )
         
-        # FIXED: Simplified prediction heads without fixed bias initialization
-        self.systolic_head = nn.Linear(bp_feature_dim // 2, 1)
-        self.diastolic_head = nn.Linear(bp_feature_dim // 2, 1)
+        self.diastolic_head = nn.Sequential(
+            nn.Linear(hidden_dim // 8, 16),
+            nn.ReLU(inplace=True),
+            nn.Linear(16, 1)
+        )
         
-        # FIXED: Better weight initialization without fixed biases
+        # Initialize weights for better SBP/DBP prediction
         self._initialize_bp_heads()
+        
+        # Initialize other key components for better gradient flow
+        self._initialize_other_components()
     
     def _initialize_bp_heads(self):
-        """FIXED: Initialize BP prediction heads with Xavier initialization (no fixed biases)"""
-        # Use Xavier/Glorot initialization for better gradient flow
+        """Initialize BP prediction heads for full physiological range learning"""
+        import math
+        
+        # Calculate fan_in for proper initialization
+        fan_in = self.systolic_head[-1].in_features
+        
+        # Use Xavier/Glorot initialization for weights to allow full range learning
+        std = math.sqrt(2.0 / fan_in)  # He initialization for ReLU networks
+        
         with torch.no_grad():
-            # Initialize systolic head with normal distribution
-            nn.init.xavier_normal_(self.systolic_head.weight)
-            nn.init.zeros_(self.systolic_head.bias)  # Start from zero, let it learn
+            # Systolic head: Initialize for physiological range (90-180 mmHg)
+            self.systolic_head[-1].weight.data.normal_(0, std)
+            # Set bias to middle of physiological range, not fixed value
+            self.systolic_head[-1].bias.data.uniform_(110, 130)  # Random around 120
             
-            # Initialize diastolic head with normal distribution
-            nn.init.xavier_normal_(self.diastolic_head.weight)
-            nn.init.zeros_(self.diastolic_head.bias)  # Start from zero, let it learn
+            # Diastolic head: Initialize for physiological range (60-100 mmHg) 
+            self.diastolic_head[-1].weight.data.normal_(0, std)
+            # Set bias to middle of physiological range, not fixed value
+            self.diastolic_head[-1].bias.data.uniform_(70, 90)   # Random around 80
             
-            # Initialize feature extractors
-            for module in [self.systolic_feature_extractor, self.diastolic_feature_extractor]:
-                for layer in module:
-                    if isinstance(layer, nn.Linear):
-                        nn.init.xavier_normal_(layer.weight)
-                        nn.init.zeros_(layer.bias)
+        # Also initialize earlier layers with proper scaling
+        for layer in self.systolic_head[:-1]:
+            if hasattr(layer, 'weight') and layer.weight is not None:
+                torch.nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
+            if hasattr(layer, 'bias') and layer.bias is not None:
+                layer.bias.data.zero_()
+                
+        for layer in self.diastolic_head[:-1]:
+            if hasattr(layer, 'weight') and layer.weight is not None:
+                torch.nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
+            if hasattr(layer, 'bias') and layer.bias is not None:
+                layer.bias.data.zero_()
+    
+    def _initialize_other_components(self):
+        """Initialize other model components for better learning dynamics"""
+        # Initialize waveform head with appropriate scaling for physiological range
+        with torch.no_grad():
+            # Waveform should predict BP range (40-200 mmHg), so scale appropriately
+            if self.waveform_head.weight.dim() >= 2:
+                torch.nn.init.kaiming_normal_(self.waveform_head.weight, mode='fan_out', nonlinearity='relu')
+            # Initialize bias to predict reasonable baseline (around 70 mmHg for diastolic baseline)
+            if self.waveform_head.bias is not None:
+                self.waveform_head.bias.data.uniform_(60, 80)
+        
+        # Initialize BP feature extractor with proper scaling
+        for layer in self.bp_feature_extractor:
+            if hasattr(layer, 'weight') and layer.weight is not None and layer.weight.dim() >= 2:
+                torch.nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
+            if hasattr(layer, 'bias') and layer.bias is not None:
+                layer.bias.data.zero_()
+        
+        # Initialize output layers with careful scaling
+        for layer in self.output_layers:
+            if hasattr(layer, 'weight') and layer.weight is not None and layer.weight.dim() >= 2:
+                torch.nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
+            if hasattr(layer, 'bias') and layer.bias is not None:
+                layer.bias.data.zero_()
     
     def forward(self, x_seq, return_attention=False):
         batch_size, seq_len = x_seq.shape[:2]
@@ -340,14 +376,13 @@ class ImprovedBPPredictor(nn.Module):
         # Generate predictions
         final_features = self.output_layers(features)
         
-        # FIXED: Use separate feature extractors for diversity
-        systolic_features = self.systolic_feature_extractor(final_features)
-        diastolic_features = self.diastolic_feature_extractor(final_features)
+        # Extract BP-specific features
+        bp_features = self.bp_feature_extractor(final_features)
         
         outputs = {
             'waveform': self.waveform_head(final_features),
-            'systolic': self.systolic_head(systolic_features),
-            'diastolic': self.diastolic_head(diastolic_features)
+            'systolic': self.systolic_head(bp_features),
+            'diastolic': self.diastolic_head(bp_features)
         }
         
         if return_attention and attention_weights is not None:
@@ -409,12 +444,11 @@ class ImprovedMultiHeadAttention(nn.Module):
 
 
 class ImprovedBPLoss(nn.Module):
-    """FIXED: Improved loss function with MSE loss for finer predictions and relaxed constraints"""
+    """Improved loss function with Huber loss, better weighting, and physiological constraints"""
     
     def __init__(self, waveform_weight=0.4, systolic_weight=0.3, diastolic_weight=0.3, 
                  huber_delta=1.0, loss_type='composite', 
-                 physiological_constraint=False, pulse_pressure_weight=0.05,
-                 use_mse_for_bp=True, diversity_loss_weight=0.02):
+                 physiological_constraint=True, pulse_pressure_weight=0.1):
         super(ImprovedBPLoss, self).__init__()
         self.waveform_weight = waveform_weight
         self.systolic_weight = systolic_weight
@@ -423,8 +457,6 @@ class ImprovedBPLoss(nn.Module):
         self.loss_type = loss_type
         self.physiological_constraint = physiological_constraint
         self.pulse_pressure_weight = pulse_pressure_weight
-        self.use_mse_for_bp = use_mse_for_bp  # FIXED: Use MSE for finer BP predictions
-        self.diversity_loss_weight = diversity_loss_weight  # Encourage prediction diversity
         
         # Normalize weights
         total = waveform_weight + systolic_weight + diastolic_weight
@@ -438,75 +470,47 @@ class ImprovedBPLoss(nn.Module):
         # Extract ground truth values using improved method
         target_systolic, target_diastolic = self.extract_bp_values_improved(targets)
         
-        # FIXED: Waveform loss with Huber for robustness, but MSE for BP components
+        # Waveform loss with Huber loss for robustness
         waveform_loss = nn.functional.huber_loss(pred_waveform, targets, delta=self.huber_delta)
         
-        # FIXED: Component losses with more sensitive loss functions
+        # Component losses
         if 'systolic' in predictions:
             pred_systolic = predictions['systolic'].squeeze()
-            
-            # FIXED: Relaxed physiological constraints (soft penalty instead of hard constraint)
-            physiological_penalty = 0.0
+            # Ensure physiological constraints (SBP > DBP)
             if self.physiological_constraint and 'diastolic' in predictions:
                 pred_diastolic = predictions['diastolic'].squeeze()
-                # Soft penalty for physiologically implausible values
-                invalid_bp = torch.relu(pred_diastolic - pred_systolic + 5.0)  # Allow some overlap
-                physiological_penalty = torch.mean(invalid_bp) * 0.1  # Much weaker penalty
-                
-            # FIXED: Use MSE for finer-grained BP prediction
-            if self.use_mse_for_bp:
-                systolic_loss = nn.functional.mse_loss(pred_systolic, target_systolic)
+                # Add penalty if SBP <= DBP
+                invalid_bp = (pred_systolic <= pred_diastolic).float()
+                physiological_penalty = torch.mean(invalid_bp * torch.abs(pred_systolic - pred_diastolic))
             else:
-                systolic_loss = nn.functional.huber_loss(pred_systolic, target_systolic, delta=self.huber_delta)
+                physiological_penalty = 0.0
+                
+            systolic_loss = nn.functional.huber_loss(pred_systolic, target_systolic, delta=self.huber_delta)
             systolic_loss += physiological_penalty
         else:
             pred_sys, _ = self.extract_bp_values_improved(pred_waveform)
-            if self.use_mse_for_bp:
-                systolic_loss = nn.functional.mse_loss(pred_sys, target_systolic)
-            else:
-                systolic_loss = nn.functional.huber_loss(pred_sys, target_systolic, delta=self.huber_delta)
+            systolic_loss = nn.functional.huber_loss(pred_sys, target_systolic, delta=self.huber_delta)
         
         if 'diastolic' in predictions:
             pred_diastolic = predictions['diastolic'].squeeze()
-            # FIXED: Use MSE for finer-grained BP prediction
-            if self.use_mse_for_bp:
-                diastolic_loss = nn.functional.mse_loss(pred_diastolic, target_diastolic)
-            else:
-                diastolic_loss = nn.functional.huber_loss(pred_diastolic, target_diastolic, delta=self.huber_delta)
+            diastolic_loss = nn.functional.huber_loss(pred_diastolic, target_diastolic, delta=self.huber_delta)
         else:
             _, pred_dias = self.extract_bp_values_improved(pred_waveform)
-            if self.use_mse_for_bp:
-                diastolic_loss = nn.functional.mse_loss(pred_dias, target_diastolic)
-            else:
-                diastolic_loss = nn.functional.huber_loss(pred_dias, target_diastolic, delta=self.huber_delta)
+            diastolic_loss = nn.functional.huber_loss(pred_dias, target_diastolic, delta=self.huber_delta)
         
-        # FIXED: Much lighter pulse pressure constraint
+        # Add pulse pressure constraint (optional)
         pulse_pressure_loss = 0.0
-        if 'systolic' in predictions and 'diastolic' in predictions:
+        if self.physiological_constraint and 'systolic' in predictions and 'diastolic' in predictions:
             pred_pp = predictions['systolic'].squeeze() - predictions['diastolic'].squeeze()
             target_pp = target_systolic - target_diastolic
-            if self.use_mse_for_bp:
-                pulse_pressure_loss = nn.functional.mse_loss(pred_pp, target_pp)
-            else:
-                pulse_pressure_loss = nn.functional.huber_loss(pred_pp, target_pp, delta=self.huber_delta)
-        
-        # FIXED: Add diversity loss to encourage varied predictions
-        diversity_loss = 0.0
-        if 'systolic' in predictions and 'diastolic' in predictions:
-            pred_sys = predictions['systolic'].squeeze()
-            pred_dias = predictions['diastolic'].squeeze()
-            # Encourage diversity by penalizing constant predictions
-            sys_variance = torch.var(pred_sys) if pred_sys.numel() > 1 else torch.tensor(0.0, device=pred_sys.device)
-            dias_variance = torch.var(pred_dias) if pred_dias.numel() > 1 else torch.tensor(0.0, device=pred_dias.device)
-            diversity_loss = -torch.log(sys_variance + 1e-6) - torch.log(dias_variance + 1e-6)
+            pulse_pressure_loss = nn.functional.huber_loss(pred_pp, target_pp, delta=self.huber_delta)
         
         # Compute total loss
         if self.loss_type == 'composite':
             total_loss = (self.waveform_weight * waveform_loss + 
                          self.systolic_weight * systolic_loss + 
                          self.diastolic_weight * diastolic_loss +
-                         self.pulse_pressure_weight * pulse_pressure_loss +
-                         self.diversity_loss_weight * diversity_loss)
+                         self.pulse_pressure_weight * pulse_pressure_loss)
         else:
             total_loss = waveform_loss
         
@@ -515,12 +519,11 @@ class ImprovedBPLoss(nn.Module):
             'waveform_loss': waveform_loss,
             'systolic_loss': systolic_loss,
             'diastolic_loss': diastolic_loss,
-            'pulse_pressure_loss': pulse_pressure_loss,
-            'diversity_loss': diversity_loss
+            'pulse_pressure_loss': pulse_pressure_loss
         }
     
     def extract_bp_values_improved(self, waveform):
-        """Extract systolic and diastolic values with improved physiological accuracy"""
+        """Extract systolic and diastolic values with smooth, continuous extraction to prevent block patterns"""
         batch_size, signal_length = waveform.shape
         device = waveform.device
         
@@ -530,36 +533,66 @@ class ImprovedBPLoss(nn.Module):
         for i in range(batch_size):
             signal = waveform[i]
             
-            # Apply light smoothing to reduce noise
-            if signal_length > 5:
-                kernel = torch.ones(3, device=device) / 3
+            # Apply stronger smoothing for continuous extraction
+            if signal_length > 7:
+                # Use larger kernel for smoother extraction
+                kernel = torch.tensor([0.1, 0.2, 0.4, 0.2, 0.1], device=device)
                 signal_smooth = torch.nn.functional.conv1d(
                     signal.unsqueeze(0).unsqueeze(0), 
                     kernel.unsqueeze(0).unsqueeze(0), 
-                    padding=1
+                    padding=2
                 ).squeeze()
             else:
                 signal_smooth = signal
             
-            # Systolic (maximum in smoothed signal)
+            # Systolic: Use parabolic interpolation around maximum for continuity
             sys_val, sys_idx = torch.max(signal_smooth, dim=0)
+            sys_idx = sys_idx.item()
             
-            # Diastolic: Look for minimum in diastolic window
-            # Typically occurs in last 1/3 of cardiac cycle or after systolic peak
-            search_start = max(sys_idx.item() + 1, int(signal_length * 0.6))
+            # Parabolic interpolation for sub-sample precision
+            if 1 <= sys_idx <= signal_length - 2:
+                y1, y2, y3 = signal_smooth[sys_idx-1], signal_smooth[sys_idx], signal_smooth[sys_idx+1]
+                # Parabolic interpolation formula
+                a = (y1 + y3 - 2*y2) / 2
+                if abs(a) > 1e-6:  # Avoid division by zero
+                    offset = (y1 - y3) / (4 * a)
+                    sys_val = y2 + a * offset * offset
+                    
+            # Diastolic: Use smooth minimum finding with parabolic interpolation
+            search_start = max(sys_idx + 1, int(signal_length * 0.6))
             search_end = min(signal_length, int(signal_length * 0.95))
             
             if search_start < search_end:
                 diastolic_window = signal_smooth[search_start:search_end]
-                dias_val_rel, _ = torch.min(diastolic_window, dim=0)
-                dias_val = dias_val_rel
+                dias_val_rel, local_min_idx = torch.min(diastolic_window, dim=0)
+                global_min_idx = search_start + local_min_idx.item()
+                
+                # Parabolic interpolation for diastolic minimum
+                if search_start + 1 <= global_min_idx <= search_end - 2:
+                    y1 = signal_smooth[global_min_idx-1]
+                    y2 = signal_smooth[global_min_idx] 
+                    y3 = signal_smooth[global_min_idx+1]
+                    a = (y1 + y3 - 2*y2) / 2
+                    if abs(a) > 1e-6:
+                        offset = (y1 - y3) / (4 * a)
+                        dias_val = y2 + a * offset * offset
+                    else:
+                        dias_val = dias_val_rel
+                else:
+                    dias_val = dias_val_rel
             else:
-                # Fallback: use global minimum but constrain it to be < systolic
+                # Fallback: use global minimum with smoothing
                 dias_val = torch.min(signal_smooth)
                 
-            # Ensure physiological constraint: diastolic < systolic
-            if dias_val >= sys_val:
-                dias_val = sys_val - 10.0  # Minimum pulse pressure of 10 mmHg
+            # Ensure physiological constraint with smooth enforcement
+            pulse_pressure = sys_val - dias_val
+            min_pulse_pressure = 15.0  # Minimum realistic pulse pressure
+            
+            if pulse_pressure < min_pulse_pressure:
+                # Smoothly adjust to maintain minimum pulse pressure
+                center_pressure = (sys_val + dias_val) / 2
+                sys_val = center_pressure + min_pulse_pressure / 2
+                dias_val = center_pressure - min_pulse_pressure / 2
                 
             systolic_values[i] = sys_val
             diastolic_values[i] = dias_val
@@ -789,17 +822,14 @@ def main():
     
     # Initialize improved loss and optimizer
     loss_weights = loss_config.get('loss_weights', {})
-    loss_params = loss_config.get('loss_params', {})
     criterion = ImprovedBPLoss(
         waveform_weight=loss_weights.get('waveform_weight', 0.4),
         systolic_weight=loss_weights.get('systolic_weight', 0.3),
         diastolic_weight=loss_weights.get('diastolic_weight', 0.3),
-        huber_delta=loss_params.get('huber_delta', 1.0),
+        huber_delta=loss_config.get('loss_params', {}).get('huber_delta', 1.0),
         loss_type=loss_config.get('loss_type', 'composite'),
-        physiological_constraint=loss_config.get('physiological_constraint', False),
-        pulse_pressure_weight=loss_config.get('pulse_pressure_weight', 0.05),
-        use_mse_for_bp=loss_params.get('use_mse_for_bp', True),
-        diversity_loss_weight=loss_params.get('diversity_loss_weight', 0.02)
+        physiological_constraint=loss_config.get('physiological_constraint', True),
+        pulse_pressure_weight=loss_config.get('pulse_pressure_weight', 0.1)
     )
     
     # Use AdamW optimizer
@@ -853,7 +883,6 @@ def main():
         train_systolic_loss = 0.0
         train_diastolic_loss = 0.0
         train_pulse_pressure_loss = 0.0
-        train_diversity_loss = 0.0
         num_train_batches = 0
         
         train_pbar = tqdm(train_loader, desc="Training")
@@ -884,7 +913,6 @@ def main():
                 train_systolic_loss += loss_dict['systolic_loss'].item()
                 train_diastolic_loss += loss_dict['diastolic_loss'].item()
                 train_pulse_pressure_loss += loss_dict['pulse_pressure_loss'].item()
-                train_diversity_loss += loss_dict['diversity_loss'].item()
                 num_train_batches += 1
                 
                 train_pbar.set_postfix({
@@ -906,7 +934,6 @@ def main():
         val_systolic_loss = 0.0
         val_diastolic_loss = 0.0
         val_pulse_pressure_loss = 0.0
-        val_diversity_loss = 0.0
         val_predictions = []
         val_targets = []
         val_systolic_predictions = []
@@ -931,7 +958,6 @@ def main():
                     val_systolic_loss += loss_dict['systolic_loss'].item()
                     val_diastolic_loss += loss_dict['diastolic_loss'].item()
                     val_pulse_pressure_loss += loss_dict['pulse_pressure_loss'].item()
-                    val_diversity_loss += loss_dict['diversity_loss'].item()
                     num_val_batches += 1
                     
                     # Store predictions for metrics
@@ -1301,25 +1327,63 @@ def main():
 
 
 def extract_bp_values_numpy(waveform):
-    """Extract systolic and diastolic values from BP waveform (numpy version)"""
+    """Extract systolic and diastolic values with smooth, continuous extraction (numpy version)"""
     if isinstance(waveform, torch.Tensor):
         waveform = waveform.detach().cpu().numpy()
     
     if len(waveform.shape) > 1:
         waveform = waveform.flatten()
     
-    # Systolic (maximum)
-    systolic = np.max(waveform)
-    sys_idx = np.argmax(waveform)
-    
-    # Diastolic (minimum after systolic peak)
-    search_start = max(sys_idx + 1, len(waveform) // 2)
-    
-    if search_start < len(waveform):
-        post_systolic = waveform[search_start:]
-        diastolic = np.min(post_systolic)
+    # Apply smoothing for continuous extraction
+    if len(waveform) > 7:
+        from scipy import ndimage
+        # Gaussian smoothing for continuous values
+        smoothed = ndimage.gaussian_filter1d(waveform, sigma=1.0)
     else:
-        diastolic = np.min(waveform)
+        smoothed = waveform
+    
+    # Systolic with parabolic interpolation
+    sys_idx = np.argmax(smoothed)
+    systolic = smoothed[sys_idx]
+    
+    # Parabolic interpolation for sub-sample precision
+    if 1 <= sys_idx <= len(smoothed) - 2:
+        y1, y2, y3 = smoothed[sys_idx-1], smoothed[sys_idx], smoothed[sys_idx+1]
+        a = (y1 + y3 - 2*y2) / 2
+        if abs(a) > 1e-6:
+            offset = (y1 - y3) / (4 * a)
+            systolic = y2 + a * offset * offset
+    
+    # Diastolic with smooth minimum finding
+    search_start = max(sys_idx + 1, int(len(smoothed) * 0.6))
+    search_end = min(len(smoothed), int(len(smoothed) * 0.95))
+    
+    if search_start < search_end:
+        post_systolic = smoothed[search_start:search_end]
+        local_min_idx = np.argmin(post_systolic)
+        global_min_idx = search_start + local_min_idx
+        diastolic = smoothed[global_min_idx]
+        
+        # Parabolic interpolation for diastolic
+        if search_start + 1 <= global_min_idx <= search_end - 2:
+            y1 = smoothed[global_min_idx-1]
+            y2 = smoothed[global_min_idx]
+            y3 = smoothed[global_min_idx+1]
+            a = (y1 + y3 - 2*y2) / 2
+            if abs(a) > 1e-6:
+                offset = (y1 - y3) / (4 * a)
+                diastolic = y2 + a * offset * offset
+    else:
+        diastolic = np.min(smoothed)
+    
+    # Ensure physiological constraint with smooth enforcement
+    pulse_pressure = systolic - diastolic
+    min_pulse_pressure = 15.0
+    
+    if pulse_pressure < min_pulse_pressure:
+        center_pressure = (systolic + diastolic) / 2
+        systolic = center_pressure + min_pulse_pressure / 2
+        diastolic = center_pressure - min_pulse_pressure / 2
     
     return systolic, diastolic
 

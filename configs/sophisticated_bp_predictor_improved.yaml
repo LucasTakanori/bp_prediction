@@ -1,5 +1,5 @@
-# FIXED: Improved BP Predictor Configuration
-# Addresses SBP/DBP prediction issues with enhanced architecture and better loss weighting
+# Improved BP Predictor Configuration
+# Addresses SBP/DBP prediction issues with enhanced architecture and loss weighting
 
 environment:
   data_root: "/home/lucas_takanori/phd/data"
@@ -13,9 +13,9 @@ data_config:
   subjects: ["subject001"]
   session: "baseline"
   
-  # CRITICAL: Reduce data leakage and overfitting
-  max_samples_per_subject: 300  # Increased for better diversity
-  sequence_step_size: 3  # FIXED: Smaller step for more data diversity
+  # CRITICAL: Reduce overlap to prevent discrete patterns
+  max_samples_per_subject: 500  # Reduced to prevent overfitting
+  sequence_step_size: 15  # INCREASED to reduce overlap and prevent block patterns
   
   # Data loading options
   preload_to_memory: false
@@ -24,49 +24,49 @@ data_config:
   return_metadata: true
   
   # Use multi-frame for better temporal information
-  pattern_offsets: [-4, -3, -2, -1, 0, 1, 2]  # Multi-frame temporal modeling
-  sequence_length: 7
+  pattern_offsets: [-7 ,-6 ,-5, -4, -3, -2, -1, 0, 1, 2]  # Multi-frame temporal modeling
+  sequence_length: 10
   
   # Data splits
   train_split: 0.7
   val_split: 0.15
   test_split: 0.15
   
-  # CRITICAL: Proper normalization matching VAE training
+  # CRITICAL: Improved normalization for continuous predictions
   bp_normalization: [40.0, 200.0]
   frame_normalization: "vae_compatible"  # Match VAE training
   
-  # FIXED: Reduced data augmentation to prevent overfitting
+  # NO noise augmentation as requested
   use_augmentation: false
-  noise_level: 0.001  # Minimal noise
+  noise_level: 0.0
 
 model_config:
   model_type: "sophisticated_bp_predictor"
   
-  # VAE Configuration
+  # VAE Configuration - Keep same size
   vae_config:
-    latent_dim: 128  # Increased for better representation
+    latent_dim: 128  # Keep original size
     freeze_vae: true
     vae_checkpoint_path: "/home/lucas_takanori/phd/bp_prediction/experiments/experiment_20250616_223305/checkpoints/vae_best.pt"
   
-  # FIXED: Enhanced BiLSTM Configuration
+  # BiLSTM Configuration - Keep same size
   bilstm_config:
     input_dim: 64
-    hidden_dim: 512  # INCREASED for better feature representation
-    num_layers: 2  # REDUCED to prevent overfitting
+    hidden_dim: 128  # Keep original size
+    num_layers: 2    # Keep original depth
     output_dim: 50
     bidirectional: true
-    dropout_rate: 0.2  # REDUCED for better learning
+    dropout_rate: 0.3  # Moderate dropout
     
-  # FIXED: Multi-Head Self-Attention Configuration
+  # Multi-Head Self-Attention Configuration - Keep same size
   attention_config:
     use_attention: true
     attention_type: "multi_head_self_attention"
-    attention_dim: 64  
-    num_attention_heads: 4  # REDUCED to prevent overfitting
-    attention_dropout: 0.1  # REDUCED
-    current_frame_bias: 1.0  # REDUCED bias
-    use_physiological_features: true  # Enable enhanced features
+    attention_dim: 64
+    num_attention_heads: 4  # Keep original size
+    attention_dropout: 0.2
+    current_frame_bias: 1.5  # Moderate bias to prevent overemphasis
+    use_physiological_features: true
     
   # Auxiliary Prediction Heads
   auxiliary_heads:
@@ -82,11 +82,11 @@ model_config:
 
 training_config:
   # Basic training parameters
-  num_epochs: 100  # More epochs for better convergence
-  batch_size: 8  # Larger batch for stable gradients
-  learning_rate: 0.001  # INCREASED for faster learning
+  num_epochs: 60  # More epochs for better convergence
+  batch_size: 8   # Slightly larger for stability
+  learning_rate: 0.0005  # Higher learning rate for better gradient flow
   optimizer: "adamw"
-  weight_decay: 1e-5  # REDUCED regularization
+  weight_decay: 1e-4  # Standard regularization
   
   # Advanced optimizer settings
   optimizer_config:
@@ -98,26 +98,26 @@ training_config:
   scheduler_config:
     use_scheduler: true
     scheduler_type: "reduce_on_plateau"
-    scheduler_patience: 15  # More patience
-    factor: 0.7  
-    min_lr: 1e-7
+    scheduler_patience: 6  # Faster adaptation
+    factor: 0.7
+    min_lr: 1e-6
     
   # Mixed precision and optimization
   optimization:
     use_mixed_precision: false
-    grad_clip_norm: 2.0  # RELAXED gradient clipping
-    accumulate_grad_batches: 1  # No accumulation
+    grad_clip_norm: 0.5  # Tighter gradient clipping
+    accumulate_grad_batches: 1  # No accumulation for direct gradients
     
   # Early stopping
   early_stopping:
-    patience: 20  # More patience
-    min_delta: 1e-4
+    patience: 12
+    min_delta: 0.001
     monitor: "val_mae"
     mode: "min"
     
   # Checkpointing
   checkpointing:
-    save_every_n_epochs: 10
+    save_every_n_epochs: 5
     save_best_only: true
     save_last: true
     monitor: "val_mae"
@@ -128,52 +128,50 @@ training_config:
     val_check_interval: 1.0
 
 loss_config:
-  # FIXED: Enhanced loss configuration for continuous BP prediction
+  # CRITICAL: Rebalanced loss for continuous predictions
   loss_type: "composite"
   
-  # FIXED: Better balanced loss weights
+  # More balanced loss weights to encourage smooth learning
   loss_weights:
-    waveform_weight: 0.3   # Balanced with BP components
-    systolic_weight: 0.35  # Strong focus on systolic
-    diastolic_weight: 0.35 # Strong focus on diastolic
+    waveform_weight: 0.5   # Higher emphasis on overall shape
+    systolic_weight: 0.25  # Balanced with waveform
+    diastolic_weight: 0.25 # Balanced with waveform
     
-  # FIXED: Advanced loss parameters
+  # Advanced loss parameters - Keep Huber loss as requested
   loss_params:
     reduction: "mean"
     label_smoothing: 0.0
-    huber_delta: 1.0  # Standard Huber delta
-    use_mse_for_bp: true  # CRITICAL: Use MSE for finer BP predictions
-    diversity_loss_weight: 0.01  # Encourage prediction diversity
+    huber_delta: 1.0  # Standard Huber delta for smoothness
     
-  # BP calculation method
+  # Improved BP extraction for continuous values
   bp_extraction:
-    systolic_method: "max"
-    diastolic_method: "min_after_systolic"
+    systolic_method: "max_with_smoothing"  # Smooth extraction
+    diastolic_method: "min_after_systolic_smoothed"  # Smooth extraction
     
   # Normalization for loss calculation
-  normalize_for_loss: false  # Use raw mmHg values
+  normalize_for_loss: false
   bp_norm_range: [40.0, 200.0]
   
-  # FIXED: Relaxed physiological constraints
-  physiological_constraint: false  # DISABLED rigid constraints
-  pulse_pressure_weight: 0.02  # Much lighter constraint
+  # Physiological constraints with lighter weight
+  physiological_constraint: true
+  pulse_pressure_weight: 0.05  # Lighter constraint
 
 logging_config:
   level: "INFO"
-  log_every_n_steps: 20
+  log_every_n_steps: 25
   
   wandb:
     use_wandb: false
     project: "improved-bp-prediction"
     mode: "offline"
-    tags: ["fixed", "continuous", "mse-loss"]
-    group: "improved_bp_predictor_fixed"
+    tags: ["improved", "continuous", "fixed-blocks"]
+    group: "improved_bp_predictor"
     
   visualization:
     visualize_attention: true
     plot_predictions: true
     save_prediction_plots: true
-    plot_every_n_epochs: 10
+    plot_every_n_epochs: 5
     num_examples_to_plot: 5
 
 evaluation_config:
@@ -183,33 +181,14 @@ evaluation_config:
     - "pulse_pressure_mae"
     - "waveform_correlation"
     - "clinical_accuracy"
-    - "prediction_variance"  # Track prediction diversity
   
-  clinical_thresholds: [5, 10, 15]  # mmHg tolerances
+  clinical_thresholds: [5, 10, 15]
   
-  # Alternative architectures to try (for research)
-  experimental_configs:
-    beta_vae:
-      latent_dim: 128
-      beta: 4.0
-      disentanglement_loss: true
-    
-    transformer_based:
-      use_transformer: true
-      num_transformer_layers: 6
-      transformer_heads: 8
-      positional_encoding: true
-    
-    multi_task:
-      auxiliary_tasks:
-        - "heart_rate_prediction"
-        - "pulse_pressure_prediction"
-        - "mean_arterial_pressure"
-      
-    curriculum_learning:
-      stage1_epochs: 10  # Train only waveform
-      stage2_epochs: 15  # Add systolic
-      stage3_epochs: 25  # Add diastolic and constraints
+  # Focus on continuous prediction quality
+  prediction_quality:
+    check_continuity: true
+    smoothness_penalty: true
+    correlation_focus: true
 
 hardware_config:
   device: "auto"
@@ -218,12 +197,12 @@ hardware_config:
   persistent_workers: true
   
   memory_optimization:
-    empty_cache_every_n_steps: 100
+    empty_cache_every_n_steps: 50
     max_memory_usage: 0.8
 
 output_config:
-  output_dir: "./experiments/improved_bp_predictor_fixed"
-  experiment_name: "improved_bp_predictor_fixed"
+  output_dir: "./experiments/improved_bp_predictor_continuous_10_frames"
+  experiment_name: "improved_bp_predictor_continuous_10_frames"
   
   save_results:
     save_predictions: true
@@ -236,17 +215,17 @@ output_config:
     include_metrics: true
 
 experiment_info:
-  name: "improved_bp_predictor_fixed"
+  name: "improved_bp_predictor_continuous"
   description: |
-    FIXED blood pressure prediction system with:
-    - No fixed bias initialization (120/80)
-    - Separate feature extractors for SBP/DBP diversity
-    - MSE loss for finer-grained predictions
-    - Relaxed physiological constraints
-    - Diversity loss to prevent constant predictions
-    - Better architecture with wider bottlenecks
+    Fixed blood pressure prediction system addressing:
+    - Block-like Bland-Altman patterns by reducing data overlap
+    - Poor R² scores through better loss balancing
+    - Continuous prediction learning
+    - Smooth BP value extraction
+    - No noise augmentation
+    - Same model size maintained
   version: "2.1.0"
-  author: "Fixed BP Prediction System"
+  author: "Improved BP Prediction System"
   created_date: "2025-01-17"
 
 advanced_config:
