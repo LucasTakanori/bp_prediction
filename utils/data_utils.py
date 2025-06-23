@@ -102,6 +102,7 @@ class PviDataset(Dataset):
         self.file_name = self._file_path.name
         self.parent_dir = self._file_path.parent
         self.device = device
+        self.num_periods = 0
         
         print(f'Using Torch version: {torch.__version__}')
         print(f'Data directory set to:\n\t{self.parent_dir}')
@@ -115,6 +116,14 @@ class PviDataset(Dataset):
             raise FileNotFoundError(f"Data file not found at: {self._file_path}")
         
         self._h5data = self._load_raw_data()
+
+        if self._h5meta.get('mask') is None:
+            if self.num_periods > 0:
+                print(f"Generating default mask from {self.num_periods} periods.")
+                self._h5meta['mask'] = tuple((i, i + 1) for i in range(self.num_periods))
+            else:
+                self._h5meta['mask'] = []
+
         self.samples = self._stack_samples()
 
         print("Finish loading PviDataset!")
@@ -161,11 +170,19 @@ class PviDataset(Dataset):
                 else:
                     metadata[key] = []
             
-            arr = h5meta['mask'][()].astype(np.int32)
-            arr[0] = arr[0] - 1 # for slicing in python
-            metadata['mask'] = tuple(map(tuple, arr.T))
+            if 'mask' in h5meta:
+                arr = h5meta['mask'][()].astype(np.int32)
+                arr[0] = arr[0] - 1 # for slicing in python
+                metadata['mask'] = tuple(map(tuple, arr.T))
+            else:
+                print("⚠️  'mask' not found in metadata. Will attempt to generate one.")
+                metadata['mask'] = None
             
-            metadata['date'] = h5meta['date'][()].item().decode()
+            if 'date' in h5meta:
+                metadata['date'] = h5meta['date'][()].item().decode()
+            else:
+                metadata['date'] = 'Unknown'
+
         # dt = time.time() - t1
         print('\t ...Done!')
         return metadata
@@ -191,7 +208,12 @@ class PviDataset(Dataset):
 
         dt = time.time() - t1
         print(f'\t ...Done! ({dt:.2f} seconds)')  
-        print(f"Number of periods: {tensor.shape[0]}")
+        if 'tensor' in locals():
+            self.num_periods = tensor.shape[0]
+            print(f"Number of periods: {self.num_periods}")
+        else:
+            self.num_periods = 0
+            print(f"Number of periods: 0")
         return data
     
     def _stack_samples(self) -> Dict:

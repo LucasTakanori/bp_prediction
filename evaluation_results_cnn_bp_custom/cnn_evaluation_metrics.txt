@@ -1,0 +1,31 @@
+CNN-BASED BP PREDICTOR EVALUATION RESULTS
+==================================================
+
+SYSTOLIC METRICS:
+  mae: 26.4314
+  mse: 753.2076
+  rmse: 27.4446
+  correlation: 0.1826
+  r2: -12.7974
+
+DIASTOLIC METRICS:
+  mae: 25.0882
+  mse: 672.2678
+  rmse: 25.9281
+  correlation: 0.2117
+  r2: -14.6891
+
+WAVEFORM METRICS:
+  mae: 7.7152
+  mse: 108.4502
+  rmse: 10.4139
+  correlation: 0.7950
+  r2: 0.6001
+
+CLINICAL ACCURACY:
+  systolic_5mmhg: 0.00%
+  systolic_10mmhg: 1.00%
+  systolic_15mmhg: 7.00%
+  diastolic_5mmhg: 0.00%
+  diastolic_10mmhg: 3.00%
+  diastolic_15mmhg: 7.00%

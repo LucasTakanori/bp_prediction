@@ -1,0 +1,76 @@
+# Multi-Subject VAE Configuration (Fixed)
+# Based on the working vae_baseline.yaml but adapted for multiple subjects
+
+environment:
+  data_root: "${BP_DATA_ROOT:/home/lucas_takanori/phd/data}"
+  experiments_root: "${BP_EXPERIMENTS_ROOT:./experiments}"
+  cache_dir: "${BP_CACHE_DIR:./cache}"
+
+data_config:
+  # Path configuration
+  root_path: "${BP_DATA_ROOT:/home/lucas_takanori/phd/data}"
+  subject: "subject001"  # Will be overridden by multisubject logic
+  session: "baseline"
+  cache_dir: "${BP_CACHE_DIR:./cache}"
+  
+  # Data loading options (same as working baseline)
+  preload_to_memory: false
+  use_mmap: true
+  force_reload: false
+  return_metadata: true
+
+model_config:
+  model_type: "vae"
+  
+  # VAE architecture (same as working baseline)
+  latent_dim: 128
+  input_channels: 1
+  input_height: 32
+  input_width: 32
+  hidden_dims: [64, 128, 256, 512]
+  
+  # Training parameters (same as working baseline)
+  dropout_rate: 0.2
+  activation: "relu"
+  use_batch_norm: true
+
+training_config:
+  # Basic training parameters (proven settings)
+  num_epochs: 100  # Shorter for initial testing
+  batch_size: 64  # Increased to match fast single-subject performance
+  learning_rate: 1e-4
+  optimizer: "adam"
+  weight_decay: 1e-4
+  
+  # VAE-specific parameters (same as working baseline)
+  beta_min: 0.01
+  beta_max: 0.35
+  beta_warmup_epochs: 50  # Adjusted for shorter training
+  
+  # Scheduler (same as working baseline)
+  use_scheduler: true
+  scheduler_type: "cosine"
+  
+  # Mixed precision and optimization (same as working baseline)
+  use_mixed_precision: false
+  grad_clip_norm: 1.0
+  
+  # Early stopping (same as working baseline)
+  early_stopping_patience: 1000
+  early_stopping_min_delta: 1e-4
+  
+  # Checkpointing (same as working baseline)
+  save_every_n_epochs: 5
+  
+  # Output
+  output_dir: "${BP_EXPERIMENTS_ROOT:./experiments}"
+
+logging_config:
+  level: "INFO"
+  use_wandb: false  # Can be enabled with --wandb flag
+  wandb_project: "${WANDB_PROJECT:multisubject-vae}"
+  wandb_mode: "online"  # online, offline, disabled
+  
+# Experiment metadata
+experiment_name: "multisubject_vae_fixed"
+description: "Multi-subject VAE training using proven baseline configuration" 

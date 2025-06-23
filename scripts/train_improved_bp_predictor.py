@@ -679,9 +679,18 @@ class VAE(nn.Module):
 
 
 def load_config_file(config_path):
-    """Load YAML configuration file"""
+    """Load YAML configuration file and replace dynamic placeholders"""
+    import datetime
+    
     with open(config_path, 'r') as file:
-        config = yaml.safe_load(file)
+        config_text = file.read()
+    
+    # Replace timestamp placeholder with current datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    config_text = config_text.replace('{timestamp}', timestamp)
+    
+    # Parse the modified YAML
+    config = yaml.safe_load(config_text)
     return config
 
 

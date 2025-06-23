@@ -1,5 +1,5 @@
-# Improved BP Predictor Configuration
-# Addresses SBP/DBP prediction issues with enhanced architecture and loss weighting
+# CNN-Based BP Predictor Configuration
+# Uses custom lightweight CNN instead of VAE for feature extraction
 
 environment:
   data_root: "/home/lucas_takanori/phd/data"
@@ -13,9 +13,9 @@ data_config:
   subjects: ["subject001"]
   session: "baseline"
   
-  # CRITICAL: Reduce overlap to prevent discrete patterns
-  max_samples_per_subject: 1000  # Reduced to prevent overfitting
-  sequence_step_size: 15  # INCREASED to reduce overlap and prevent block patterns
+  # Reduce overlap to prevent discrete patterns
+  max_samples_per_subject: 1000
+  sequence_step_size: 15  # Reduced overlap
   
   # Data loading options
   preload_to_memory: false
@@ -23,50 +23,51 @@ data_config:
   force_reload: false
   return_metadata: true
   
-  # Use multi-frame for better temporal information
-  pattern_offsets: [-7 ,-6 ,-5, -4, -3, -2, -1, 0, 1, 2]  # Multi-frame temporal modeling
+  # Multi-frame temporal modeling
+  pattern_offsets: [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2]
   sequence_length: 10
   
   # Data splits
-  train_split: 0.7
-  val_split: 0.15
-  test_split: 0.15
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
   
-  # CRITICAL: Improved normalization for continuous predictions
+  # Improved normalization for continuous predictions
   bp_normalization: [40.0, 200.0]
-  frame_normalization: "vae_compatible"  # Match VAE training
+  frame_normalization: "zero_one"  # Standard 0-1 normalization for CNN
   
-  # NO noise augmentation as requested
+  # No noise augmentation
   use_augmentation: false
   noise_level: 0.0
 
 model_config:
-  model_type: "sophisticated_bp_predictor"
+  model_type: "cnn_bp_predictor"
   
-  # VAE Configuration - Keep same size
-  vae_config:
-    latent_dim: 128  # Keep original size
-    freeze_vae: true
-    vae_checkpoint_path: "/home/lucas_takanori/phd/bp_prediction/experiments/experiment_20250616_223305/checkpoints/vae_best.pt"
-  
-  # BiLSTM Configuration - Keep same size
+  # CNN Feature Extractor Configuration
+  cnn_config:
+    input_channels: 1
+    feature_dim: 128  # Output features from CNN
+    use_batch_norm: true
+    dropout_rate: 0.2
+    
+  # BiLSTM Configuration
   bilstm_config:
-    input_dim: 64
-    hidden_dim: 128  # Keep original size
-    num_layers: 2    # Keep original depth
+    input_dim: 128  # Matches CNN output
+    hidden_dim: 128
+    num_layers: 2
     output_dim: 50
     bidirectional: true
-    dropout_rate: 0.3  # Moderate dropout
+    dropout_rate: 0.3
     
-  # Multi-Head Self-Attention Configuration - Keep same size
+  # Multi-Head Self-Attention Configuration
   attention_config:
     use_attention: true
     attention_type: "multi_head_self_attention"
     attention_dim: 64
-    num_attention_heads: 4  # Keep original size
+    num_attention_heads: 4
     attention_dropout: 0.2
-    current_frame_bias: 2  # Moderate bias to prevent overemphasis
-    use_physiological_features: true
+    current_frame_bias: 1.5
+    use_physiological_features: false
     
   # Auxiliary Prediction Heads
   auxiliary_heads:
@@ -82,11 +83,11 @@ model_config:
 
 training_config:
   # Basic training parameters
-  num_epochs: 60  # More epochs for better convergence
-  batch_size: 4   # Slightly larger for stability
-  learning_rate: 0.0005  # Higher learning rate for better gradient flow
+  num_epochs: 80
+  batch_size: 8
+  learning_rate: 0.001  # Slightly higher for end-to-end training
   optimizer: "adamw"
-  weight_decay: 1e-5  # Standard regularization
+  weight_decay: 1e-4
   
   # Advanced optimizer settings
   optimizer_config:
@@ -98,19 +99,19 @@ training_config:
   scheduler_config:
     use_scheduler: true
     scheduler_type: "reduce_on_plateau"
-    scheduler_patience: 6  # Faster adaptation
+    scheduler_patience: 6
     factor: 0.7
-    min_lr: 1e-7
+    min_lr: 1e-6
     
   # Mixed precision and optimization
   optimization:
     use_mixed_precision: false
-    grad_clip_norm: 0.5  # Tighter gradient clipping
-    accumulate_grad_batches: 1  # No accumulation for direct gradients
+    grad_clip_norm: 0.5
+    accumulate_grad_batches: 1
     
   # Early stopping
   early_stopping:
-    patience: 12
+    patience: 15
     min_delta: 0.001
     monitor: "val_mae"
     mode: "min"
@@ -128,33 +129,33 @@ training_config:
     val_check_interval: 1.0
 
 loss_config:
-  # CRITICAL: Rebalanced loss for continuous predictions
+  # Composite loss for end-to-end training
   loss_type: "composite"
   
-  # More balanced loss weights to encourage smooth learning
+  # Balanced loss weights
   loss_weights:
-    waveform_weight: 0.5   # Higher emphasis on overall shape
-    systolic_weight: 0.25  # Balanced with waveform
-    diastolic_weight: 0.25 # Balanced with waveform
+    waveform_weight: 0.4
+    systolic_weight: 0.3
+    diastolic_weight: 0.3
     
-  # Advanced loss parameters - Keep Huber loss as requested
+  # Loss parameters
   loss_params:
     reduction: "mean"
     label_smoothing: 0.0
-    huber_delta: 1.0  # Standard Huber delta for smoothness
+    huber_delta: 1.0
     
-  # Improved BP extraction for continuous values
+  # BP extraction methods
   bp_extraction:
-    systolic_method: "max_with_smoothing"  # Smooth extraction
-    diastolic_method: "min_after_systolic_smoothed"  # Smooth extraction
+    systolic_method: "max_with_smoothing"
+    diastolic_method: "min_after_systolic_smoothed"
     
   # Normalization for loss calculation
   normalize_for_loss: false
   bp_norm_range: [40.0, 200.0]
   
-  # Physiological constraints with lighter weight
+  # Physiological constraints
   physiological_constraint: true
-  pulse_pressure_weight: 0.05  # Lighter constraint
+  pulse_pressure_weight: 0.05
 
 logging_config:
   level: "INFO"
@@ -162,10 +163,10 @@ logging_config:
   
   wandb:
     use_wandb: false
-    project: "improved-bp-prediction"
+    project: "cnn-bp-prediction"
     mode: "offline"
-    tags: ["improved", "continuous", "fixed-blocks"]
-    group: "improved_bp_predictor"
+    tags: ["cnn", "end-to-end", "custom-features"]
+    group: "cnn_bp_predictor"
     
   visualization:
     visualize_attention: true
@@ -184,7 +185,6 @@ evaluation_config:
   
   clinical_thresholds: [5, 10, 15]
   
-  # Focus on continuous prediction quality
   prediction_quality:
     check_continuity: true
     smoothness_penalty: true
@@ -192,7 +192,7 @@ evaluation_config:
 
 hardware_config:
   device: "auto"
-  num_workers: 16
+  num_workers: 4
   pin_memory: true
   persistent_workers: true
   
@@ -201,8 +201,8 @@ hardware_config:
     max_memory_usage: 0.8
 
 output_config:
-  output_dir: "./experiments/improved_bp_predictor_continuous_10_frames_2{timestamp}"
-  experiment_name: "improved_bp_predictor_continuous_10_frames_2{timestamp}"
+  output_dir: "./experiments/cnn_bp_predictor_{timestamp}"
+  experiment_name: "cnn_bp_predictor_{timestamp}"
   
   save_results:
     save_predictions: true
@@ -215,17 +215,16 @@ output_config:
     include_metrics: true
 
 experiment_info:
-  name: "improved_bp_predictor_continuous"
+  name: "cnn_bp_predictor"
   description: |
-    Fixed blood pressure prediction system addressing:
-    - Block-like Bland-Altman patterns by reducing data overlap
-    - Poor R² scores through better loss balancing
-    - Continuous prediction learning
-    - Smooth BP value extraction
-    - No noise augmentation
-    - Same model size maintained
-  version: "2.1.0"
-  author: "Improved BP Prediction System"
+    CNN-based blood pressure prediction system:
+    - Custom lightweight CNN for feature extraction
+    - End-to-end training (no frozen components)
+    - Task-specific optimization for BP prediction
+    - Same temporal modeling as VAE version
+    - Direct comparison with VAE approach
+  version: "1.0.0"
+  author: "CNN BP Prediction System"
   created_date: "2025-01-17"
 
 advanced_config:

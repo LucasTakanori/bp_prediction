@@ -1,0 +1,223 @@
+# Multi-Subject BiLSTM + VAE Configuration
+# Optimized for BP prediction with VAE feature extraction
+# Designed to outperform existing models in R² and Bland-Altman metrics
+
+environment:
+  data_root: "/home/lucas_takanori/phd/data"
+  experiments_root: "./experiments"
+  cache_dir: "./cache"
+
+data_config:
+  # Path configuration
+  root_path: "/home/lucas_takanori/phd/data"
+  session: "baseline"
+  
+  # Multi-subject training: Will auto-detect all available subjects
+  subjects: "auto"  # Will load all available subjects
+  
+  # Data loading options
+  preload_to_memory: false
+  use_mmap: true
+  force_reload: false
+  return_metadata: true
+  
+  # Sequence configuration for temporal modeling
+  sequence_length: 10  # 10-frame sequences for temporal context
+  pattern_offsets: [-4, -3, -2, -1, 0, 1, 2, 3, 4]  # Temporal offsets
+  sequence_step_size: 5  # Reduce overlap for better generalization
+  
+  # Normalization parameters
+  frame_normalization: "zero_one"  # Normalize to [0, 1] range
+  bp_normalization: [40.0, 200.0]  # BP range in mmHg
+
+model_config:
+  model_type: "vae_bilstm"
+  
+  # VAE Configuration (frozen feature extractor)
+  vae_config:
+    latent_dim: 128  # Must match pre-trained VAE
+    freeze_vae: true  # Freeze VAE weights during training
+    vae_checkpoint_path: null  # Will be provided as command line argument
+  
+  # BiLSTM Configuration - optimized for performance
+  bilstm_config:
+    input_dim: 128  # Must match VAE latent_dim
+    hidden_dim: 256  # Increased for better representation
+    num_layers: 3   # Deep network for complex patterns
+    output_dim: 50  # BP signal length
+    bidirectional: true
+    dropout_rate: 0.3
+    use_attention: true
+    attention_heads: 8  # Multi-head attention
+    
+  # Advanced features for better performance
+  advanced_features:
+    use_residual_connections: true
+    use_layer_norm: true
+    use_gradient_checkpointing: false
+
+training_config:
+  # Basic training parameters - optimized for convergence
+  num_epochs: 100  # More epochs for multi-subject convergence
+  batch_size: 16   # Optimal batch size for memory and performance
+  learning_rate: 5e-4  # Conservative learning rate
+  optimizer: "adamw"
+  weight_decay: 1e-5  # Light regularization
+  
+  # Advanced optimizer settings
+  optimizer_config:
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    amsgrad: false
+  
+  # Learning rate scheduler
+  use_scheduler: true
+  scheduler_type: "reduce_on_plateau"
+  scheduler_patience: 8
+  factor: 0.7
+  min_lr: 1e-7
+  
+  # Mixed precision and optimization
+  use_mixed_precision: false  # Stable training first
+  grad_clip_norm: 1.0
+  
+  # Early stopping
+  early_stopping_patience: 15
+  early_stopping_min_delta: 1e-5
+  
+  # Checkpointing
+  save_every_n_epochs: 5
+  save_best_only: true
+  save_last: true
+
+# Loss configuration - optimized for R² performance
+loss_config:
+  loss_type: "composite"
+  
+  # Balanced loss weights for optimal R² scores
+  waveform_weight: 0.4   # Focus on overall waveform shape
+  systolic_weight: 0.3   # Systolic BP prediction
+  diastolic_weight: 0.3  # Diastolic BP prediction
+  
+  # Loss parameters
+  huber_delta: 1.0  # Smooth L1 loss for robustness
+  reduction: "mean"
+  
+  # Physiological constraints
+  physiological_constraint: true
+  min_pulse_pressure: 15.0  # Minimum realistic pulse pressure
+
+logging_config:
+  level: "INFO"
+  log_every_n_steps: 25
+  
+  # Weights & Biases logging
+  use_wandb: false  # Enable manually with --wandb flag
+  wandb_project: "multisubject-bp-prediction"
+  wandb_mode: "online"
+  
+  # Visualization settings
+  visualize_predictions: true
+  save_prediction_plots: true
+  plot_every_n_epochs: 10
+  num_examples_to_plot: 8
+
+# Multi-subject specific configurations
+multisubject_config:
+  # Subject selection
+  max_subjects: null  # Use all available subjects
+  exclude_subjects: []  # List of subjects to exclude
+  
+  # Sample balancing across subjects
+  max_samples_per_subject: null  # No limit for maximum data
+  min_samples_per_subject: 50    # Minimum samples required per subject
+  
+  # Subject-aware training
+  use_subject_weighting: false  # Equal weight to all subjects
+  subject_batch_balancing: true  # Ensure diverse subjects per batch
+
+# Evaluation configuration - focus on clinical metrics
+evaluation_config:
+  metrics_to_track:
+    - "systolic_r2"      # Primary metric for comparison
+    - "diastolic_r2"     # Primary metric for comparison
+    - "systolic_mae"
+    - "diastolic_mae"
+    - "waveform_r2"
+    - "clinical_accuracy"
+  
+  # Clinical accuracy thresholds
+  clinical_thresholds: [5, 10, 15]  # mmHg tolerance levels
+  
+  # Performance targets (to beat existing models)
+  performance_targets:
+    systolic_r2_target: 0.85    # Target R² for systolic BP
+    diastolic_r2_target: 0.80   # Target R² for diastolic BP
+    systolic_mae_target: 8.0    # Target MAE for systolic BP (mmHg)
+    diastolic_mae_target: 6.0   # Target MAE for diastolic BP (mmHg)
+
+# Experiment metadata
+experiment_info:
+  name: "multisubject_bp_prediction"
+  description: |
+    Multi-subject VAE+BiLSTM training for blood pressure prediction.
+    Uses pre-trained VAE encoder as feature extractor with BiLSTM for temporal modeling.
+    Designed to outperform existing models in R² and Bland-Altman analysis.
+  version: "1.0.0"
+  author: "Multi-Subject BP Prediction System"
+  created_date: "2025-01-17"
+  
+  # Performance goals
+  goals:
+    - "Achieve R² > 0.85 for systolic BP prediction"
+    - "Achieve R² > 0.80 for diastolic BP prediction"
+    - "Outperform existing models in Bland-Altman analysis"
+    - "Demonstrate strong multi-subject generalization"
+    - "Maintain clinical accuracy thresholds"
+
+# Hardware and performance settings
+hardware_config:
+  device: "auto"  # Will auto-detect CUDA/CPU
+  num_workers: 4  # Data loading workers
+  pin_memory: true
+  persistent_workers: true
+  
+  # Memory optimization
+  empty_cache_every_n_steps: 50
+  max_memory_usage: 0.85
+
+# Advanced configurations
+advanced_config:
+  seed: 42
+  deterministic: true
+  benchmark: false
+  
+  # Debugging options
+  debug_mode: false
+  profile_model: false
+  detect_anomaly: false
+  
+  # Distributed training (future)
+  use_ddp: false
+  backend: "nccl"
+  find_unused_parameters: false
+
+# Output configuration
+output_config:
+  save_results:
+    save_model_summary: true
+    save_config: true
+    save_training_plots: true
+    save_prediction_examples: true
+    save_metrics_history: true
+    
+  checkpoint_naming:
+    use_timestamp: true
+    include_metrics: true
+    
+  # Results analysis
+  generate_analysis:
+    bland_altman_plots: true
+    correlation_plots: true
+    error_histograms: true
+    performance_comparison: true 

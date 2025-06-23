@@ -1,0 +1,170 @@
+# Multi-Subject VAE Configuration
+# Optimized for training VAE on all available subjects for maximum generalization
+
+environment:
+  data_root: "/home/lucas_takanori/phd/data"
+  experiments_root: "./experiments"
+  cache_dir: "./cache"
+
+data_config:
+  # Path configuration
+  root_path: "/home/lucas_takanori/phd/data"
+  session: "baseline"
+  
+  # Multi-subject training: Will auto-detect all available subjects
+  # Available subjects: subject001-subject037 (with some gaps)
+  subjects: "auto"  # Will load all available subjects
+  
+  # Data loading options
+  preload_to_memory: false
+  use_mmap: true
+  force_reload: false
+  return_metadata: true
+  
+  # Frame selection for VAE training
+  frame_selection: "middle"  # Use middle frame from each sequence
+  
+  # Normalization parameters
+  frame_normalization: "zero_one"  # Normalize to [0, 1] range for VAE
+
+model_config:
+  model_type: "vae"
+  
+  # VAE architecture - optimized for 32x32 PVI images
+  latent_dim: 128  # Increased for better representation across subjects
+  input_channels: 1
+  input_height: 32
+  input_width: 32
+  
+  # Encoder/decoder architecture
+  hidden_dims: [64, 128, 256, 512]  # Progressive feature learning
+  
+  # Training parameters
+  dropout_rate: 0.2
+  activation: "relu"
+  use_batch_norm: true
+
+training_config:
+  # Basic training parameters
+  num_epochs: 80  # More epochs for multi-subject convergence
+  batch_size: 32  # Larger batch for stable multi-subject training
+  learning_rate: 1e-4  # Conservative learning rate
+  optimizer: "adam"
+  weight_decay: 1e-5  # Light regularization
+  
+  # VAE-specific parameters - Beta-VAE with warmup
+  beta_min: 0.01      # Start with low KL weight
+  beta_max: 0.4       # Moderate final KL weight for good reconstruction
+  beta_warmup_epochs: 25  # Gradual increase over 25 epochs
+  
+  # Advanced optimizer settings
+  optimizer_config:
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    amsgrad: false
+  
+  # Learning rate scheduler
+  use_scheduler: true
+  scheduler_type: "reduce_on_plateau"
+  scheduler_patience: 12
+  factor: 0.8
+  min_lr: 1e-7
+  
+  # Mixed precision and optimization
+  use_mixed_precision: false  # Stable training first
+  grad_clip_norm: 1.0
+  
+  # Early stopping
+  early_stopping_patience: 20  # Patience for multi-subject training
+  early_stopping_min_delta: 1e-5
+  
+  # Checkpointing
+  save_every_n_epochs: 5
+  save_best_only: true
+  save_last: true
+
+logging_config:
+  level: "INFO"
+  log_every_n_steps: 50
+  
+  # Weights & Biases logging
+  use_wandb: false  # Enable manually with --wandb flag
+  wandb_project: "multisubject-vae-training"
+  wandb_mode: "online"
+  
+  # Visualization settings
+  visualize_reconstructions: true
+  save_reconstruction_plots: true
+  plot_every_n_epochs: 10
+  num_examples_to_plot: 8
+
+# Multi-subject specific configurations
+multisubject_config:
+  # Subject selection
+  max_subjects: null  # Use all available subjects (set to number to limit)
+  exclude_subjects: []  # List of subjects to exclude, e.g., ["subject001"]
+  
+  # Sample balancing across subjects
+  max_samples_per_subject: null  # No limit (set to number to balance)
+  min_samples_per_subject: 100   # Minimum samples required per subject
+  
+  # Subject-aware training
+  use_subject_weighting: false  # Equal weight to all subjects
+  subject_batch_balancing: true  # Ensure each batch has diverse subjects
+
+# Experiment metadata
+experiment_info:
+  name: "multisubject_vae"
+  description: |
+    Multi-subject VAE training for learning generalizable PVI image representations.
+    Trains on all available subjects (33 subjects) to learn robust latent features
+    that can be used for downstream BP prediction tasks.
+  version: "1.0.0"
+  author: "Multi-Subject BP Prediction System"
+  created_date: "2025-01-17"
+  
+  # Expected outcomes
+  goals:
+    - "Learn subject-invariant PVI image representations"
+    - "Achieve good reconstruction quality across all subjects"
+    - "Create robust feature extractor for BP prediction"
+    - "Establish baseline for multi-subject generalization"
+
+# Hardware and performance settings
+hardware_config:
+  device: "auto"  # Will auto-detect CUDA/CPU
+  num_workers: 4  # Data loading workers
+  pin_memory: true
+  persistent_workers: true
+  
+  # Memory optimization
+  empty_cache_every_n_steps: 100
+  max_memory_usage: 0.85
+
+# Advanced configurations
+advanced_config:
+  seed: 42
+  deterministic: true
+  benchmark: false
+  
+  # Debugging options
+  debug_mode: false
+  profile_model: false
+  detect_anomaly: false
+  
+  # Distributed training (future)
+  use_ddp: false
+  backend: "nccl"
+  find_unused_parameters: false
+
+# Output configuration
+output_config:
+  save_results:
+    save_model_summary: true
+    save_config: true
+    save_training_plots: true
+    save_sample_reconstructions: true
+    
+  checkpoint_naming:
+    use_timestamp: true
+    include_metrics: true 
