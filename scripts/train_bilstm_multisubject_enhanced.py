@@ -9,9 +9,11 @@ import os
 import sys
 import argparse
 import logging
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
+import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -1101,7 +1103,6 @@ class BiLSTMEvaluator:
                 return obj
         
         # Save metrics to JSON for programmatic access
-        import json
         json_path = output_dir / 'bilstm_evaluation_metrics.json'
         json_compatible_metrics = convert_numpy_types(metrics)
         with open(json_path, 'w') as f:
@@ -1277,7 +1278,6 @@ def save_system_info(experiment_dir):
     """Save system and environment information"""
     import platform
     import psutil
-    import subprocess
     
     system_info = {
         'system': {
@@ -1977,7 +1977,6 @@ def main():
             }
         }
         
-        import json
         with open(experiment_dir / "experiment_metadata.json", 'w') as f:
             json.dump(experiment_metadata, f, indent=2, default=str)
         

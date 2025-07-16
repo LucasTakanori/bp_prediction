@@ -1,4 +1,4 @@
-# Multi-Subject BiLSTM + VAE Configuration
+# Multi-Subject Transformer + VAE Configuration
 # Optimized for BP prediction with VAE feature extraction
 # Designed to outperform existing models in R² and Bland-Altman metrics
 
@@ -31,7 +31,7 @@ data_config:
   bp_normalization: [40.0, 200.0]  # BP range in mmHg
 
 model_config:
-  model_type: "vae_bilstm"
+  model_type: "vae_transformer"
   
   # VAE Configuration (frozen feature extractor)
   vae_config:
@@ -39,16 +39,16 @@ model_config:
     freeze_vae: true  # Freeze VAE weights during training
     vae_checkpoint_path: null  # Will be provided as command line argument
   
-  # BiLSTM Configuration - optimized for performance
-  bilstm_config:
+  # Transformer Configuration - optimized for performance
+  transformer_config:
     input_dim: 128  # Must match VAE latent_dim
-    hidden_dim: 256  # Increased for better representation
-    num_layers: 3   # Deep network for complex patterns
+    d_model: 256    # Transformer model dimension
+    nhead: 8        # Number of attention heads
+    num_layers: 4   # Number of transformer encoder layers
+    dim_feedforward: 512  # Dimension of feedforward network
     output_dim: 50  # BP signal length
-    bidirectional: true
-    dropout_rate: 0.3
-    use_attention: true
-    attention_heads: 8  # Multi-head attention
+    dropout_rate: 0.1
+    use_attention_bias: true
     
   # Advanced features for better performance
   advanced_features:
@@ -67,9 +67,9 @@ training_config:
   # Basic training parameters - optimized for convergence
   num_epochs: 20  # More epochs for multi-subject convergence
   batch_size: 512   # Optimal batch size for memory and performance
-  learning_rate: 5e-4  # Conservative learning rate
+  learning_rate: 1e-4  # Conservative learning rate for transformer
   optimizer: "adamw"
-  weight_decay: 1e-5  # Light regularization
+  weight_decay: 1e-2  # Slightly higher regularization for transformer
   
   # Advanced optimizer settings
   optimizer_config:
@@ -120,7 +120,7 @@ logging_config:
   
   # Weights & Biases logging
   use_wandb: false  # Enable manually with --wandb flag
-  wandb_project: "multisubject-bp-prediction"
+  wandb_project: "multisubject-transformer-bp-prediction"
   wandb_mode: "online"
   
   # Visualization settings
@@ -165,10 +165,10 @@ evaluation_config:
 
 # Experiment metadata
 experiment_info:
-  name: "multisubject_bp_prediction"
+  name: "multisubject_transformer_bp_prediction"
   description: |
-    Multi-subject VAE+BiLSTM training for blood pressure prediction.
-    Uses pre-trained VAE encoder as feature extractor with BiLSTM for temporal modeling.
+    Multi-subject VAE+Transformer training for blood pressure prediction.
+    Uses pre-trained VAE encoder as feature extractor with Transformer for temporal modeling.
     Designed to outperform existing models in R² and Bland-Altman analysis.
   version: "1.0.0"
   author: "Multi-Subject BP Prediction System"

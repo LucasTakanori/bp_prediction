@@ -36,7 +36,7 @@ model_config:
 
 training_config:
   # Basic training parameters (proven settings)
-  num_epochs: 20  # Shorter for initial testing
+  num_epochs: 5  # Shorter for initial testing
   batch_size: 256  # Increased to match fast single-subject performance
   learning_rate: 1e-4
   optimizer: "adam"
