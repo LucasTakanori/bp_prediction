@@ -23,8 +23,8 @@ data_config:
   
   # Sequence configuration for temporal modeling
   sequence_length: 10  # 10-frame sequences for temporal context
-  pattern_offsets: [-4, -3, -2, -1, 0, 1, 2, 3, 4]  # Temporal offsets
-  sequence_step_size: 5  # Reduce overlap for better generalization
+  pattern_offsets: [-7,-6,-5,-4, -3, -2, -1, 0, 1, 2]  # Temporal offsets
+  sequence_step_size: 15  # Reduce overlap for better generalization
   
   # Normalization parameters
   frame_normalization: "zero_one"  # Normalize to [0, 1] range
@@ -55,11 +55,18 @@ model_config:
     use_residual_connections: true
     use_layer_norm: true
     use_gradient_checkpointing: false
+  
+  # Attention configuration - focus on current frame (t+0)
+  attention_config:
+    use_attention: true
+    num_attention_heads: 8
+    current_frame_bias: 3.0  # Strong bias toward current frame for better prediction
+    use_physiological_features: true
 
 training_config:
   # Basic training parameters - optimized for convergence
-  num_epochs: 100  # More epochs for multi-subject convergence
-  batch_size: 16   # Optimal batch size for memory and performance
+  num_epochs: 40  # More epochs for multi-subject convergence
+  batch_size: 512   # Optimal batch size for memory and performance
   learning_rate: 5e-4  # Conservative learning rate
   optimizer: "adamw"
   weight_decay: 1e-5  # Light regularization

@@ -19,7 +19,7 @@ export SRUN_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK
 #export SLURM_CPU_BIND=none # This line accelerates training x4 in mn5
 
 # Activate virtual environment
-source /gpfs/projects/bsc88/speech/research/scripts/Lucas/vae_lstm_test/test/bin/activate
+source /gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/.venv/bin/activate
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
@@ -35,10 +35,7 @@ cd /gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction
 WANDB_MODE='offline'
 
 # Run VAE training with new modular system
-srun python scripts/train_model.py \
-    --config configs/vae_mn5.yaml \
-    --device auto \
-    --debug
+srun python scripts/train_vae_multisubject_enhanced.py --config configs/vae_multisubject_fixed.yaml --max-subjects 40 --device cuda --mask-type mask10 --data-root /gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data
 
 echo "VAE training completed!"
 echo "Check results in vae_outputs/ directory" 

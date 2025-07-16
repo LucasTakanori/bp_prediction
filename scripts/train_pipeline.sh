@@ -1,15 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=pipeline_vae_bilstm
+#SBATCH --job-name=bilstm_Training_New
 #SBATCH --output=./logs/%x_%j.log
 #SBATCH --error=./logs/%x_%j.err
 #SBATCH --nodes 1
 #SBATCH -c 80
 #SBATCH --gres=gpu:1
-#SBATCH --time=03:00:00
+#SBATCH --time=01:00:00
 #SBATCH -A bsc88
-##SBATCH --qos=acc_debug
-##SBATCH --exclusive
-#SBATCH -q acc_bscls  
+#SBATCH --qos=acc_debug
+#SBATCH --exclusive
+##SBATCH -q acc_bscls  
 
 # For debugging:
 #-#sbatch -q acc_debug train_bilstm_mn5.sh
@@ -31,18 +31,19 @@ echo "GPU: $CUDA_VISIBLE_DEVICES"
 
 # Change to project directory
 cd /gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction
-
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512    # Avoids some OOMs due to memory fragmentation
+export NCCL_BUFFSIZE=1048576                            # Avoids some OOM due to NCCL communication overhead
 WANDB_MODE='offline'
-
+export NCCL_P2P_DISABLE=1 # Disable NCCL P2P communication to reduce overhead
 # Run bilstm training with new modular system
-srun python scripts/train_bilstm_multisubject_enhanced.py \
-    --config configs/bilstm_multisubject.yaml \
+srun python scripts/train_pipeline_vae_bilstm.py \
+    --config configs/pipeline_vae_bilstm.yaml \
     --max-subjects 32 \
-    --device cuda \
     --mask-type mask10 \
     --data-root /gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data \
-    --vae-checkpoint /gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/experiments/enhanced_multisubject_vae_32subjects_mask10/checkpoints/vae_final.pt \
-    --max-eval-samples 1000000
+    --device cuda
+
+
 
 echo "bilstm training completed!"
 echo "Check results in bilstm_outputs/ directory" 

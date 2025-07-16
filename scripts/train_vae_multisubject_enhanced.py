@@ -10,7 +10,7 @@ import argparse
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import numpy as np
 import torch
 import gc  # Add garbage collection
@@ -84,6 +84,30 @@ def parse_arguments():
         action="store_true",
         help="Only analyze mask formats, don't train"
     )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=42,
+        help="Seed for reproducible subject-level splits (CRITICAL for no data leakage)"
+    )
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.8,
+        help="Training split ratio (default: 0.8 for 80%)"
+    )
+    parser.add_argument(
+        "--val-ratio", 
+        type=float,
+        default=0.2,
+        help="Validation split ratio (default: 0.2 for 20%)"
+    )
+    parser.add_argument(
+        "--test-ratio", 
+        type=float,
+        default=0.2,
+        help="Test split ratio (default: 0.2 for 20%)"
+    )
     
     return parser.parse_args()
 
@@ -116,6 +140,136 @@ def get_available_subjects(data_root: str) -> List[str]:
         subjects.append(subject)
     
     return sorted(subjects)
+
+
+def create_subject_level_splits(subjects: List[str], train_ratio: float = 0.6, 
+                               val_ratio: float = 0.2, test_ratio: float = 0.2, 
+                               seed: int = 42) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Create subject-level train/val/test splits to prevent data leakage
+    
+    Args:
+        subjects: List of all available subjects
+        train_ratio: Ratio for training split (default: 0.6 for 60%)
+        val_ratio: Ratio for validation split (default: 0.2 for 20%)
+        test_ratio: Ratio for test split (default: 0.2 for 20%)
+        seed: Random seed for reproducibility
+    
+    Returns:
+        Tuple of (train_subjects, val_subjects, test_subjects)
+    """
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Split ratios must sum to 1.0"
+    
+    logger.info(f"🔒 Creating SUBJECT-LEVEL splits to prevent data leakage:")
+    logger.info(f"   Train: {train_ratio:.1%}, Val: {val_ratio:.1%}, Test: {test_ratio:.1%}")
+    logger.info(f"   Total subjects: {len(subjects)}")
+    logger.info(f"   Random seed: {seed}")
+    
+    # Set random seed for reproducibility
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    # Shuffle subjects deterministically
+    shuffled_subjects = subjects.copy()
+    np.random.shuffle(shuffled_subjects)
+    
+    # Calculate split sizes
+    n_total = len(shuffled_subjects)
+    n_train = int(n_total * train_ratio)
+    n_val = int(n_total * val_ratio)
+    # Test gets the remaining (to ensure all subjects are used)
+    
+    # Create splits
+    train_subjects = shuffled_subjects[:n_train]
+    val_subjects = shuffled_subjects[n_train:n_train + n_val]
+    test_subjects = shuffled_subjects[n_train + n_val:]
+    
+    logger.info(f"📊 Subject distribution:")
+    logger.info(f"   Train: {len(train_subjects)} subjects: {train_subjects}")
+    logger.info(f"   Val:   {len(val_subjects)} subjects: {val_subjects}")
+    logger.info(f"   Test:  {len(test_subjects)} subjects: {test_subjects}")
+    
+    # Validate no overlap (CRITICAL)
+    all_sets = [set(train_subjects), set(val_subjects), set(test_subjects)]
+    for i, set1 in enumerate(all_sets):
+        for j, set2 in enumerate(all_sets[i+1:], i+1):
+            overlap = set1 & set2
+            set_names = ['train', 'val', 'test']
+            assert len(overlap) == 0, f"❌ LEAKAGE DETECTED: {set_names[i]}/{set_names[j]} overlap: {overlap}"
+    
+    logger.info("✅ Subject-level splits created successfully - NO DATA LEAKAGE")
+    logger.info("🔒 TEST SET ISOLATED: Test subjects will not be seen during training")
+    
+    return train_subjects, val_subjects, test_subjects
+
+
+def create_datasets_from_subject_splits(train_subjects: List[str], val_subjects: List[str], 
+                                       data_root: str, mask_type: str, session: str = "baseline"):
+    """Create separate datasets from train and val subject lists"""
+    logger.info(f"🏗️ Creating datasets from subject splits:")
+    logger.info(f"   Train subjects: {len(train_subjects)}")
+    logger.info(f"   Val subjects: {len(val_subjects)}")
+    
+    # Create training dataset
+    train_datasets = []
+    successful_train_subjects = []
+    
+    logger.info("📈 Loading TRAINING subjects...")
+    for subject in train_subjects:
+        try:
+            file_path = Path(data_root) / f"{subject}_{session}_masked.h5"
+            if not file_path.exists():
+                logger.warning(f"⚠️  Train data file not found for {subject}, skipping")
+                continue
+                
+            dataset = load_dataset_with_best_mask(str(file_path), mask_type)
+            train_datasets.append(dataset)
+            successful_train_subjects.append(subject)
+            logger.info(f"✅ Train: {subject} - {len(dataset)} samples")
+            
+        except Exception as e:
+            logger.warning(f"❌ Failed to load train {subject}: {e}")
+            continue
+    
+    # Create validation dataset
+    val_datasets = []
+    successful_val_subjects = []
+    
+    logger.info("📉 Loading VALIDATION subjects...")
+    for subject in val_subjects:
+        try:
+            file_path = Path(data_root) / f"{subject}_{session}_masked.h5"
+            if not file_path.exists():
+                logger.warning(f"⚠️  Val data file not found for {subject}, skipping")
+                continue
+                
+            dataset = load_dataset_with_best_mask(str(file_path), mask_type)
+            val_datasets.append(dataset)
+            successful_val_subjects.append(subject)
+            logger.info(f"✅ Val: {subject} - {len(dataset)} samples")
+            
+        except Exception as e:
+            logger.warning(f"❌ Failed to load val {subject}: {e}")
+            continue
+    
+    # Combine datasets within each split
+    train_combined = ConcatDataset(train_datasets) if train_datasets else None
+    val_combined = ConcatDataset(val_datasets) if val_datasets else None
+    
+    if train_combined is None or val_combined is None:
+        raise ValueError("Failed to create train or validation datasets!")
+    
+    # Memory cleanup
+    del train_datasets, val_datasets
+    gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    logger.info(f"✅ Datasets created from subject splits:")
+    logger.info(f"   Train: {len(train_combined)} samples from {len(successful_train_subjects)} subjects")
+    logger.info(f"   Val: {len(val_combined)} samples from {len(successful_val_subjects)} subjects")
+    logger.info(f"🔒 GUARANTEE: Zero subject overlap between train/val")
+    
+    return train_combined, val_combined, successful_train_subjects, successful_val_subjects
 
 
 def analyze_subjects_masks(data_root: str, subjects: List[str]) -> Dict:
@@ -188,61 +342,7 @@ def setup_device(device_arg: str):
     return device
 
 
-def create_enhanced_multisubject_dataset(data_root: str, subjects: List[str], mask_type: str = "auto", session: str = "baseline"):
-    """Create a combined dataset from multiple subjects using enhanced loader"""
-    logger.info(f"Creating enhanced multi-subject dataset from {len(subjects)} subjects...")
-    logger.info(f"Using mask type: {mask_type}")
-    
-    datasets = []
-    successful_subjects = []
-    failed_subjects = []
-    
-    for subject in subjects:
-        try:
-            # Create file path
-            file_path = Path(data_root) / f"{subject}_{session}_masked.h5"
-            
-            if not file_path.exists():
-                logger.warning(f"⚠️  Data file not found for {subject}, skipping")
-                failed_subjects.append(subject)
-                continue
-            
-            # Load dataset using enhanced loader
-            dataset = load_dataset_with_best_mask(str(file_path), mask_type)
-            
-            datasets.append(dataset)
-            successful_subjects.append(subject)
-            logger.info(f"✅ Loaded {subject}: {len(dataset)} samples")
-            
-            # Log mask info
-            mask_info = dataset.get_mask_info()
-            logger.info(f"   Available masks: {mask_info.get('available_masks', [])}")
-            logger.info(f"   Used mask: {mask_info.get('recommended_mask', 'unknown')}")
-            
-        except Exception as e:
-            logger.warning(f"❌ Failed to load {subject}: {e}")
-            failed_subjects.append(subject)
-            continue
-    
-    if not datasets:
-        raise ValueError("No valid datasets were loaded!")
-    
-    # Combine all datasets
-    combined_dataset = ConcatDataset(datasets)
-    
-    # Memory optimization: clear references and force garbage collection
-    del datasets  # Remove reference to individual datasets
-    gc.collect()  # Force garbage collection
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None  # Clear GPU cache
-    
-    total_samples = len(combined_dataset)
-    logger.info(f"🎯 Enhanced multi-subject dataset ready:")
-    logger.info(f"   📊 Successful subjects: {len(successful_subjects)}")
-    logger.info(f"   📊 Failed subjects: {len(failed_subjects)}")
-    logger.info(f"   📈 Total samples: {total_samples}")
-    logger.info(f"   📝 Average per successful subject: {total_samples / len(successful_subjects):.1f}")
-    
-    return combined_dataset, successful_subjects, failed_subjects
+# Note: This function was replaced by create_datasets_from_subject_splits for leakage-free training
 
 
 def create_model(model_config, device):
@@ -302,7 +402,7 @@ def main():
         path_manager = setup_environment(args)
         
         # Get available subjects
-        subjects = get_available_subjects(args.data_root or os.getenv('BP_DATA_ROOT', '/home/lucas_takanori/phd/data'))
+        subjects = get_available_subjects(args.data_root or os.getenv('BP_DATA_ROOT', '/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data'))
         if args.max_subjects:
             subjects = subjects[:args.max_subjects]
         
@@ -311,7 +411,7 @@ def main():
         
         # Analyze mask formats
         mask_analysis = analyze_subjects_masks(
-            args.data_root or os.getenv('BP_DATA_ROOT', '/home/lucas_takanori/phd/data'), 
+            args.data_root or os.getenv('BP_DATA_ROOT', '/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data'), 
             subjects
         )
         
@@ -330,18 +430,27 @@ def main():
         # Setup device
         device = setup_device(args.device)
         
-        # Create enhanced multi-subject dataset
-        combined_dataset, successful_subjects, failed_subjects = create_enhanced_multisubject_dataset(
+        # 🔒 CRITICAL: Create subject-level splits to prevent data leakage
+        logger.info("=" * 80)
+        logger.info("🔒 PREVENTING DATA LEAKAGE WITH SUBJECT-LEVEL SPLITS")
+        logger.info("=" * 80)
+        
+        train_subjects, val_subjects, test_subjects = create_subject_level_splits(
+            subjects, 
+            train_ratio=args.train_ratio, 
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio, 
+            seed=args.split_seed
+        )
+        
+        # Create datasets from subject splits (NO LEAKAGE)
+        train_dataset, val_dataset, successful_train_subjects, successful_val_subjects = create_datasets_from_subject_splits(
+            train_subjects, 
+            val_subjects,
             data_config.root_path, 
-            subjects,
             args.mask_type,
             getattr(data_config, 'session', 'baseline')
         )
-        
-        # Split dataset (80/20 train/val)
-        train_size = int(0.8 * len(combined_dataset))
-        val_size = len(combined_dataset) - train_size
-        train_dataset, val_dataset = random_split(combined_dataset, [train_size, val_size])
         
         # Create data loaders
         train_loader = DataLoader(
@@ -368,18 +477,40 @@ def main():
         model = create_model(model_config, device)
         
         # Create experiment directory
-        experiment_name = f"enhanced_multisubject_vae_{len(successful_subjects)}subjects_{args.mask_type}"
+        total_successful_subjects = len(successful_train_subjects) + len(successful_val_subjects)
+        experiment_name = f"enhanced_multisubject_vae_{total_successful_subjects}subjects_{args.mask_type}"
         experiment_dir = create_experiment_directory(path_manager, experiment_name)
         
-        # Save experiment metadata
+        # Save experiment metadata with NO LEAKAGE guarantee
         experiment_metadata = {
-            'successful_subjects': successful_subjects,
-            'failed_subjects': failed_subjects,
-            'mask_type': args.mask_type,
-            'mask_analysis': mask_analysis,
-            'total_samples': len(combined_dataset),
-            'train_samples': len(train_dataset),
-            'val_samples': len(val_dataset)
+            'experiment_type': 'leakage_free_subject_level_splits',
+            'split_configuration': {
+                'method': 'subject_level_splits',
+                'seed': args.split_seed,
+                'train_ratio': args.train_ratio,
+                'val_ratio': args.val_ratio,
+                'test_ratio': args.test_ratio,
+                'train_subjects': successful_train_subjects,
+                'val_subjects': successful_val_subjects,
+                'test_subjects': test_subjects,  # CRITICAL: Save test subjects for final evaluation
+                'train_subject_count': len(successful_train_subjects),
+                'val_subject_count': len(successful_val_subjects),
+                'test_subject_count': len(test_subjects)
+            },
+            'leakage_prevention': {
+                'subject_level_splits': True,
+                'no_subject_overlap': len(set(successful_train_subjects) & set(successful_val_subjects)) == 0,
+                'reproducible_seed': args.split_seed,
+                'validation_passed': True
+            },
+            'data_info': {
+                'mask_type': args.mask_type,
+                'mask_analysis': mask_analysis,
+                'train_samples': len(train_dataset),
+                'val_samples': len(val_dataset),
+                'total_samples': len(train_dataset) + len(val_dataset)
+            },
+            'command_line_args': vars(args)
         }
         
         import json
@@ -412,11 +543,20 @@ def main():
         
         trainer.train()
         
-        logger.info("=" * 70)
-        logger.info("✅ Enhanced multi-subject VAE training completed successfully!")
+        logger.info("=" * 80)
+        logger.info("✅ LEAKAGE-FREE multi-subject VAE training completed successfully!")
+        logger.info("🔒 GUARANTEED: No data leakage - subject-level splits enforced")
+        logger.info("=" * 80)
         logger.info(f"📁 Results saved to: {experiment_dir}")
-        logger.info(f"📊 Successfully trained on {len(successful_subjects)} subjects")
+        logger.info(f"📊 Training subjects: {len(successful_train_subjects)} subjects")
+        logger.info(f"📊 Validation subjects: {len(successful_val_subjects)} subjects")
+        logger.info(f"🧪 TEST subjects: {len(test_subjects)} subjects (ISOLATED for evaluation)")
         logger.info(f"📊 Mask type used: {args.mask_type}")
+        logger.info(f"🔢 Split seed used: {args.split_seed} (use same seed for BiLSTM!)")
+        logger.info(f"📋 Train subjects: {successful_train_subjects}")
+        logger.info(f"📋 Val subjects: {successful_val_subjects}")
+        logger.info(f"🧪 TEST subjects: {test_subjects}")
+        logger.info("⚠️  CRITICAL: Test subjects saved in metadata for final evaluation!")
         
     except Exception as e:
         logger.error(f"❌ Training failed: {e}")

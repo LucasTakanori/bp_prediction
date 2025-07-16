@@ -178,7 +178,7 @@ class ImprovedBPPredictor(nn.Module):
         self.vae = vae_model
         self.use_attention = use_attention
         self.use_physiological_features = use_physiological_features
-        self.pattern_offsets = pattern_offsets or [-4, -3, -2, -1, 0, 1, 2]
+        self.pattern_offsets = pattern_offsets or [-7,-6, -5,-4, -3, -2, -1, 0, 1, 2]
         
         # Freeze VAE parameters
         for param in self.vae.parameters():
@@ -749,7 +749,7 @@ def main():
     h5_file_path = str(path_manager._h5_path)
     
     print(f"Data file: {h5_file_path}")
-    print(f"Pattern offsets: {data_config.get('pattern_offsets', [-4, -3, -2, -1, 0, 1, 2])}")
+    print(f"Pattern offsets: {data_config.get('pattern_offsets', [-7,-6,-5,-4, -3, -2, -1, 0, 1, 2])}")
     print(f"Output directory: {output_dir}")
     print("="*60)
     
@@ -776,7 +776,7 @@ def main():
     print("\nCreating improved dataset...")
     dataset = ImprovedBPDataset(
         data_root=h5_file_path,
-        pattern_offsets=data_config.get('pattern_offsets', [-4, -3, -2, -1, 0, 1, 2]),
+        pattern_offsets=data_config.get('pattern_offsets', [-7,-6,-5,-4, -3, -2, -1, 0, 1, 2]),
         max_samples_per_subject=data_config.get('max_samples_per_subject', 100),
         sequence_step_size=data_config.get('sequence_step_size', 10),
         use_augmentation=data_config.get('use_augmentation', False),
@@ -816,13 +816,13 @@ def main():
     
     model = ImprovedBPPredictor(
         vae_model=vae,
-        latent_dim=vae_config.get('latent_dim', 64),
+        latent_dim=vae_config.get('latent_dim', 128),
         hidden_dim=bilstm_config.get('hidden_dim', 128),
         num_layers=bilstm_config.get('num_layers', 2),
         num_heads=attention_config.get('num_attention_heads', 4),
         dropout=bilstm_config.get('dropout_rate', 0.4),
         use_attention=attention_config.get('use_attention', True),
-        pattern_offsets=data_config.get('pattern_offsets', [-4, -3, -2, -1, 0, 1, 2]),
+        pattern_offsets=data_config.get('pattern_offsets', [-7,-6,-5,-4, -3, -2, -1, 0, 1, 2]),
         current_frame_bias=attention_config.get('current_frame_bias', 1.5),
         use_physiological_features=attention_config.get('use_physiological_features', True)
     ).to(device)
@@ -1403,7 +1403,7 @@ def generate_prediction_examples(model, dataset, device, num_examples=8,
     import seaborn as sns
     
     if pattern_offsets is None:
-        pattern_offsets = [-4, -3, -2, -1, 0, 1, 2]
+        pattern_offsets = [-7,-6,-5,-4, -3, -2, -1, 0, 1, 2]
     
     model.eval()
     examples = []

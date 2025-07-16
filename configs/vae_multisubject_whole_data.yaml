@@ -1,5 +1,6 @@
-# Multi-Subject VAE Configuration (Fixed)
-# Based on the working vae_baseline.yaml but adapted for multiple subjects
+# Multi-Subject VAE Configuration for Whole Data (No Masking)
+# Based on train_enhanced.py approach - image in, image out without normalization
+# Uses ALL available data without any masking
 
 environment:
   data_root: "${BP_DATA_ROOT:/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/data}"
@@ -13,7 +14,7 @@ data_config:
   session: "baseline"
   cache_dir: "${BP_CACHE_DIR:/gpfs/projects/bsc88/speech/research/scripts/Lucas/bp_prediction/cache}"
   
-  # Data loading options (same as working baseline)
+  # Data loading options - using basic PviDataset (no masking)
   preload_to_memory: false
   use_mmap: true
   force_reload: false
@@ -36,8 +37,8 @@ model_config:
 
 training_config:
   # Basic training parameters (proven settings)
-  num_epochs: 20  # Shorter for initial testing
-  batch_size: 256  # Increased to match fast single-subject performance
+  num_epochs: 100
+  batch_size: 64  # Same as before
   learning_rate: 1e-4
   optimizer: "adam"
   weight_decay: 1e-4
@@ -45,7 +46,7 @@ training_config:
   # VAE-specific parameters (same as working baseline)
   beta_min: 0.01
   beta_max: 0.35
-  beta_warmup_epochs: 50  # Adjusted for shorter training
+  beta_warmup_epochs: 50
   
   # Scheduler (same as working baseline)
   use_scheduler: true
@@ -68,9 +69,9 @@ training_config:
 logging_config:
   level: "INFO"
   use_wandb: false  # Can be enabled with --wandb flag
-  wandb_project: "${WANDB_PROJECT:multisubject-vae}"
+  wandb_project: "${WANDB_PROJECT:multisubject-vae-whole-data}"
   wandb_mode: "online"  # online, offline, disabled
   
 # Experiment metadata
-experiment_name: "multisubject_vae_fixed"
-description: "Multi-subject VAE training using proven baseline configuration" 
+experiment_name: "multisubject_vae_whole_data"
+description: "Multi-subject VAE training using WHOLE DATA (no masking) like train_enhanced.py - image in, image out" 
