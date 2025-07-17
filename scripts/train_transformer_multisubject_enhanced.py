@@ -816,6 +816,160 @@ class TransformerEvaluator:
             f.write(f"  RMSE: {metrics['waveform']['rmse']:.3f}\n")
             f.write(f"  R²: {metrics['waveform']['r2']:.3f}\n")
     
+    def create_evaluation_plots(self, predictions: List[Dict], targets: List[Dict], 
+                              output_dir: Path, model_name: str = "Transformer BP Predictor"):
+        """Create comprehensive evaluation plots"""
+        
+        # Extract data
+        pred_sys = np.array([float(p['systolic']) for p in predictions])
+        pred_dias = np.array([float(p['diastolic']) for p in predictions])
+        pred_waveforms = np.array([p['waveform'] for p in predictions])
+        
+        true_sys = np.array([float(t['systolic']) for t in targets])
+        true_dias = np.array([float(t['diastolic']) for t in targets])
+        true_waveforms = np.array([t['waveform'] for t in targets])
+        
+        # Calculate metrics
+        metrics = self.calculate_metrics(predictions, targets)
+        
+        # Create figure
+        fig = plt.figure(figsize=(15, 12))
+        
+        # Helper function for correlation plot
+        def plot_correlation(ax, true_vals, pred_vals, title, metrics_dict):
+            ax.scatter(true_vals, pred_vals, alpha=0.6, s=20)
+            
+            # Perfect correlation line
+            min_val, max_val = min(true_vals.min(), pred_vals.min()), max(true_vals.max(), pred_vals.max())
+            ax.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.8, label='Perfect')
+            
+            # Regression line
+            z = np.polyfit(true_vals, pred_vals, 1)
+            p = np.poly1d(z)
+            ax.plot(true_vals, p(true_vals), "r-", alpha=0.8, label='Fit')
+            
+            ax.set_xlabel(f'True {title} (mmHg)')
+            ax.set_ylabel(f'Predicted {title} (mmHg)')
+            ax.set_title(f'{title} Correlation')
+            
+            # Add metrics text
+            r2 = metrics_dict.get('r2', 0)
+            correlation = metrics_dict.get('correlation', 0)
+            ax.text(0.05, 0.95, f'R²={r2:.4f}\np={correlation:.4f}', 
+                   transform=ax.transAxes, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+        
+        # Helper function for Bland-Altman plot
+        def plot_bland_altman(ax, true_vals, pred_vals, title, metrics_dict):
+            diff = pred_vals - true_vals
+            mean_vals = (pred_vals + true_vals) / 2
+            
+            ax.scatter(mean_vals, diff, alpha=0.6, s=20)
+            
+            # Mean difference line
+            mean_diff = np.mean(diff)
+            ax.axhline(mean_diff, color='blue', linestyle='-', alpha=0.8, label=f'Mean: {mean_diff:.2f}')
+            
+            # 95% limits of agreement
+            std_diff = np.std(diff)
+            upper_loa = mean_diff + 1.96 * std_diff
+            lower_loa = mean_diff - 1.96 * std_diff
+            
+            ax.axhline(upper_loa, color='red', linestyle='--', alpha=0.8, label=f'+1.96SD: {upper_loa:.2f}')
+            ax.axhline(lower_loa, color='red', linestyle='--', alpha=0.8, label=f'-1.96SD: {lower_loa:.2f}')
+            
+            ax.set_xlabel('Mean (mmHg)')
+            ax.set_ylabel('Difference (mmHg)')
+            ax.set_title(f'{title} Bland-Altman')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+        
+        # Helper function for error histogram
+        def plot_error_histogram(ax, true_vals, pred_vals, title, metrics_dict):
+            errors = np.abs(pred_vals - true_vals)
+            
+            # Create histogram with bins up to 40 mmHg
+            bins = np.arange(0, 41, 1)
+            counts, _, _ = ax.hist(errors, bins=bins, alpha=0.7, color='skyblue', edgecolor='black')
+            
+            # Add vertical lines for clinical thresholds
+            ax.axvline(5, color='green', linestyle='--', alpha=0.8, linewidth=2)
+            ax.axvline(10, color='orange', linestyle='--', alpha=0.8, linewidth=2)
+            ax.axvline(15, color='red', linestyle='--', alpha=0.8, linewidth=2)
+            
+            ax.set_xlabel('Absolute error (mmHg)')
+            ax.set_ylabel('Occurrences')
+            ax.set_title(title)
+            
+            # Calculate statistics
+            mae = np.mean(errors)
+            std_error = np.std(errors)
+            acc_5 = np.mean(errors <= 5) * 100
+            acc_10 = np.mean(errors <= 10) * 100
+            acc_15 = np.mean(errors <= 15) * 100
+            
+            # Create stats text box
+            stats_text = f'mean: {mae:.2f}\nstd: {std_error:.2f}\n5-tol: {acc_5:.2f} %\n10-tol: {acc_10:.2f} %\n15-tol: {acc_15:.2f} %'
+            ax.text(0.95, 0.95, stats_text, transform=ax.transAxes, 
+                   verticalalignment='top', horizontalalignment='right',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, pad=0.5),
+                   fontsize=10)
+            
+            ax.grid(True, alpha=0.3)
+            ax.set_xlim(0, 40)
+        
+        # Create subplots (3x3 grid)
+        # Row 1: Full waveform
+        ax1 = plt.subplot(3, 3, 1)
+        plot_correlation(ax1, true_waveforms.flatten(), pred_waveforms.flatten(), 
+                        'Waveform', metrics['waveform'])
+        
+        ax2 = plt.subplot(3, 3, 2)
+        plot_bland_altman(ax2, true_waveforms.flatten(), pred_waveforms.flatten(), 
+                         'Waveform', metrics['waveform'])
+        
+        ax3 = plt.subplot(3, 3, 3)
+        plot_error_histogram(ax3, true_waveforms.flatten(), pred_waveforms.flatten(), 
+                           'FULL', metrics['waveform'])
+        
+        # Row 2: Systolic BP
+        ax4 = plt.subplot(3, 3, 4)
+        plot_correlation(ax4, true_sys, pred_sys, 'Systolic', metrics['systolic'])
+        
+        ax5 = plt.subplot(3, 3, 5)
+        plot_bland_altman(ax5, true_sys, pred_sys, 'Systolic', metrics['systolic'])
+        
+        ax6 = plt.subplot(3, 3, 6)
+        plot_error_histogram(ax6, true_sys, pred_sys, 'SBP', metrics['systolic'])
+        
+        # Row 3: Diastolic BP
+        ax7 = plt.subplot(3, 3, 7)
+        plot_correlation(ax7, true_dias, pred_dias, 'Diastolic', metrics['diastolic'])
+        
+        ax8 = plt.subplot(3, 3, 8)
+        plot_bland_altman(ax8, true_dias, pred_dias, 'Diastolic', metrics['diastolic'])
+        
+        ax9 = plt.subplot(3, 3, 9)
+        plot_error_histogram(ax9, true_dias, pred_dias, 'DBP', metrics['diastolic'])
+        
+        # Add main title
+        n_samples = len(predictions)
+        fig.suptitle(f'{model_name} Evaluation | {n_samples} samples', fontsize=14, fontweight='bold')
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_path = output_dir / 'transformer_evaluation.png'
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        logger.info(f"📊 Evaluation plot saved: {plot_path}")
+        
+        return metrics
+
     def _extract_bp_values_numpy(self, waveform):
         """Extract systolic and diastolic values from numpy waveform"""
         # Simple smoothing
@@ -1413,6 +1567,15 @@ def main():
         
         # Calculate metrics from evaluation results
         test_metrics = evaluator.calculate_metrics(evaluation_results['predictions'], evaluation_results['targets'])
+        
+        # Create comprehensive evaluation plots (like BiLSTM)
+        logger.info("📊 Creating evaluation plots...")
+        evaluator.create_evaluation_plots(
+            evaluation_results['predictions'], 
+            evaluation_results['targets'], 
+            experiment_dir / "plots",
+            "Enhanced Transformer BP Predictor"
+        )
         
         # Save test results
         evaluator.save_results(test_metrics, experiment_dir / "results")
